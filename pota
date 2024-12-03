@@ -1120,10 +1120,10 @@ def readStats(args):
 
 def printVersion(args):
     noArgs(args, "version")
-    svnId = "$Id: pota 3674 2024-12-03 10:49:21Z uz $"
-    pId = '\d+'
-    pDate = '\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}'
-    pUser = '\w+'
+    svnId = "$Id: pota 3676 2024-12-03 11:54:14Z uz $"
+    pId = '\\d+'
+    pDate = '\\d{4}-\\d{2}-\\d{2} \\d{2}:\\d{2}:\\d{2}'
+    pUser = '\\w+'
     m = re.search(f'^\\$Id: pota ({pId}) ({pDate})Z ({pUser}) \\$$', svnId)
     if m != None:
         print(f'Version {m[1]}, last changed on {m[2]} by {m[3]}')
