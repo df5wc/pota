@@ -1,0 +1,1241 @@
+#!/usr/bin/python3
+
+# Hey mu-jed, this is -*- Python -*-
+
+# Imports
+import datetime
+import getopt
+import json
+import os
+import re
+import requests
+import sys
+import time
+from typing import Callable
+from dataclasses import dataclass
+from pathlib import Path
+
+
+###############################################################################
+#                                  Variables                                  #
+###############################################################################
+
+
+# Time constants
+SECOND = 1.0
+MINUTE = 60 * SECOND
+HOUR = 60 * MINUTE
+DAY = 24 * HOUR
+WEEK = 7 * DAY
+
+# Variables set from command line options
+debugOutput = False
+cacheDir = None
+fromCache = False
+jsonOutput = False
+rateLimit = None
+readCache = True
+writeCache = True
+
+# Rate limiting variables
+defaultRateLimit = 0.25 * SECOND
+lastApiCall = None
+
+# Cache configuration
+@dataclass
+class CacheDef:
+    holdTime:   float
+    genName:    Callable[[str, str], str]
+
+cacheConfig = {
+    'parkActivations':
+        CacheDef(2 * HOUR, lambda park, _u1 = "": f"activations-{park}.json"),
+    'countries':
+        CacheDef(1 * WEEK, lambda _u1 = "", _u2 = "": f"programs.json"),
+    'leaderboard':
+        CacheDef(2 * HOUR, lambda park, _u1 = "": f"leaderboard-{park}.json"),
+    'locations':
+        CacheDef(1 * WEEK, lambda _u1 = "", _u2 = "": f"locations.json"),
+    'parks':
+        CacheDef(2 * DAY, lambda region, _u1 = "": f"parks-{region}.json"),
+    'parkProfile':
+        CacheDef(1 * DAY, lambda park, _u1 = "": f"parkprofile-{park}.json"),
+    'callProfile':
+        CacheDef(2 * HOUR, lambda call, _u1 = "": f"callprofile-{call}.json"),
+    'parkStats':
+        CacheDef(2 * HOUR, lambda park, _u1 = "": f"parkstats-{park}.json"),
+    'callStats':
+        CacheDef(2 * HOUR, lambda call, _u1 = "": f"callstats-{call}.json"),
+    'spots':
+        CacheDef(30 * SECOND, lambda _u1 = "", _u2 = "": "spots.json"),
+    'spotComments':
+        CacheDef(30 * SECOND, lambda call, park: f"spotcomments-{call}-{park}.json")
+}
+
+cleanupConfig = {
+    'activations':      'parkActivations',
+    'programs':         'countries',
+    'leaderboard':      'leaderboard',
+    'locations':        'locations',
+    'parks':            'parks',
+    'parkprofile':      'parkProfile',
+    'callprofile':      'callProfile',
+    'parkstats':        'parkStats',
+    'callstats':        'callStats',
+    'spots':            'spots',
+    'spotcomments':     'spotComments'
+}
+
+
+###############################################################################
+#                              Helper functions                               #
+###############################################################################
+
+
+# Print an error to stderr and exit
+def error(msg):
+    print(f"Error: {msg}", file = sys.stderr)
+    exit(1)
+
+
+# Print a debug message to stderr if debug output is enabled
+def debug(msg):
+    if debugOutput:
+        print(msg, file = sys.stderr)
+
+
+# Get options with error checking
+def getOpt(args, shortopts, longopts = []):
+    try:
+        return getopt.getopt(args, shortopts, longopts)
+    except getopt.GetoptError as e:
+        error(f"{e}")
+
+
+# Check that an argument list contains at least one member
+def requireArg(args, cmd):
+    if len(args) == 0:
+        error(f'The command "{cmd}" requires at least one argument')
+
+
+# Check that the argument list for a command is empty
+def noArgs(args, cmd):
+    if len(args) != 0:
+        error(f'Unexpected arguments to \"{cmd}\": {" ".join(args)}')
+
+
+# Format some json object and print it to stdout
+def printJson(text):
+    formatted = json.dumps(text, indent=4)
+    print(formatted)
+
+
+# Check if the given token is a ham radio band
+def isBand(token):
+    return re.search("^[0-9]+C?M$", token)
+
+
+# Check if the given token is an operating mode
+def isMode(token):
+    return re.search("^AM|CW|DATA|FM|FT4|FT8|RTTY|SSB|SSTV|PHONE|PSK31$", token)
+
+
+# Check if the given token is a park id
+def isPark(token):
+    return re.search("^[a-zA-Z]{2}-[0-9]{4}$", token)
+
+
+# Check if the given token denotes a region
+def isRegion(token):
+    return re.search("^[a-zA-Z]{2}-[a-zA-Z]{2,3}$", token)
+
+
+# Check if the given token denotes a country
+def isCountry(token):
+    return re.search("^[a-zA-Z]{2}$", token)
+
+
+# Add a colon to a string (seems simple but allows easier formatting)
+def withColon(arg):
+    return arg + ":"
+
+
+# Encode a call for use within an URL
+def encodeCall(call):
+    # We only have slashes in calls so just replace these
+    return call.replace("/", "%2F")
+
+
+# Filter a list and returned a filtered variant
+def filterList(data, func):
+    result = [ ]
+    for d in data:
+        if func(d):
+            result.append(d)
+    return result
+
+
+# Call an API returning the response text. Will abort on any errors. The
+# function allows to use a cache file.
+def callApi(url, cache, maxAge):
+    global fromCache, lastApiCall, rateLimit, readCache, writeCache
+
+    # Try to read from the cache
+    if readCache:
+        cachePath = cacheDir / cache
+        debug(f"Trying to read {url} from {cachePath}")
+        try:
+            res = cachePath.stat()
+            now = time.time()
+            if fromCache or res.st_mtime >= now - maxAge:
+                debug(f"Returning cached data for {url}")
+                return cachePath.read_text()
+        except:
+            # No cache file or error accessing it. Read from the net or fail.
+            if fromCache:
+                error(f'Document \"{cache}\" not availabke in cache')
+            else:
+                debug(f"No cache file found for {url}")
+
+    # file not found in cache. Rate limit API calls if requested.
+    if rateLimit != None:
+        if lastApiCall != None:
+            timeLeft = (lastApiCall + rateLimit) - time.time()
+            if timeLeft > 0:
+                debug(f'Rate limiting API call - sleeping {timeLeft:.3f} seconds')
+                time.sleep(timeLeft)
+
+    # Do the actual API call
+    try:
+        response = requests.get(url)
+    except Exception as e:
+        error(f"Cannot open url: {url}")
+    if response.status_code == 404:
+        error(f'Cannot retrieve data: {response.text}')
+    if response.status_code != 200:
+        error('Cannot retrieve data')
+    responseText = response.text
+    if rateLimit != None:
+        lastApiCall = time.time()
+
+    # Write to the cache if one was given
+    if writeCache and cache != "":
+        # Ignore errors when writing to the cache file. The effect is just that
+        # nothing is cached.
+        try:
+            cachePath = cacheDir / cache
+            debug(f"Writing data for {url} to {cachePath}")
+            cachePath.write_text(responseText)
+        except Exception as e:
+            debug(f"Exception {e}")
+
+    # Done
+    return responseText
+
+
+# Call an API, convert the response to a JSON object and return it.
+def callJson(url, cache = "", maxAge = 0):
+    response = callApi(url, cache, maxAge)
+    try:
+        jsonData = json.loads(response)
+    except Exception as e:
+        error(f"Error converting response from {url} into json")
+    return jsonData
+
+
+# Call an API, read the response as JSON and make sure its a list.
+def callJsonList(url, cache = "", maxAge = 0):
+    jsonData = callJson(url, cache, maxAge)
+    if type(jsonData) != list:
+        error(f"Unexpected response from {url}: Not an array")
+    return jsonData
+
+
+###############################################################################
+#                         Full API calls with caching                         #
+###############################################################################
+
+
+def getParkActivations(park):
+    url = f"https://api.pota.app/park/activations/{park}?count=all"
+    cfg = cacheConfig['parkActivations']
+    return callJson(url, cfg.genName(park), cfg.holdTime)
+
+
+def getCallActivations(call):
+    # First grab the profile and read all activated parks
+    profile = getCallProfile(call)
+    if not "recent_activity" in profile:
+        return []
+    if not "activations" in profile["recent_activity"]:
+        return []
+    return profile["recent_activity"]["activations"]
+
+
+def getAwards(call):
+    # Awards are part of the call profile
+    profile = getCallProfile(call)
+    if not "awards" in profile:
+        return []
+    return profile["awards"]
+
+
+def getCountries():
+    url = f"https://api.pota.app/programs/locations"
+    cfg = cacheConfig['countries']
+    return callJsonList(url, cfg.genName(), cfg.holdTime)
+
+
+def getLeaderboard(park):
+    url = f"https://api.pota.app/park/leaderboard/{park}"
+    cfg = cacheConfig['leaderboard']
+    return callJson(url, cfg.genName(park), cfg.holdTime)
+
+
+def getLocations():
+    url = f"https://api.pota.app/locations"
+    cfg = cacheConfig['locations']
+    return callJsonList(url, cfg.genName(), cfg.holdTime)
+
+
+def getParks(region):
+    url = f"https://api.pota.app/location/parks/{region}"
+    cfg = cacheConfig['parks']
+    return callJsonList(url, cfg.genName(region), cfg.holdTime)
+
+
+def getParkProfile(park):
+    url = f"https://api.pota.app/park/{park}"
+    cfg = cacheConfig['parkProfile']
+    return callJson(url, cfg.genName(park), cfg.holdTime)
+
+
+def getCallProfile(call):
+    url = f"https://api.pota.app/profile/{encodeCall(call)}"
+    cfg = cacheConfig['callProfile']
+    return callJson(url, cfg.genName(call), cfg.holdTime)
+
+
+def getRegions(country = None):
+    countries = getCountries()
+    if country != None:
+        countries = filterList(countries, lambda e: e["prefix"] == country)
+    regions = [ ]
+    for country in countries:
+        for entity in country["entities"]:
+            for region in entity["locations"]:
+                regions.append(region)
+    return regions
+
+
+def getParkStats(park):
+    url = f"https://api.pota.app/park/stats/{park}"
+    cfg = cacheConfig['parkStats']
+    return callJson(url, cfg.genName(park), cfg.holdTime)
+
+
+def getCallStats(call):
+    url = f"https://api.pota.app/stats/user/{encodeCall(call)}"
+    cfg = cacheConfig['callStats']
+    return callJson(url, cfg.genName(call), cfg.holdTime)
+
+
+def getSpots():
+    url = "https://api.pota.app/spot/activator/"
+    cfg = cacheConfig['spots']
+    spots = callJsonList(url, cfg.genName(), cfg.holdTime)
+    # Fixup the spots: An empty mode means "SSB". Also add band information.
+    for spot in spots:
+        if spot["mode"] == "":
+            spot["mode"] = "SSB"
+        freq = float(spot["frequency"])
+        if freq >= 135.7 and freq <= 135.8:
+            spot["band"] = "2200M"
+        elif freq >= 472.0 and freq <= 479.0:
+            spot["band"] = "630M"
+        elif freq >= 1810.0 and freq <= 2000.0:
+            spot["band"] = "160M"
+        elif freq >= 3500.0 and freq <= 4000.0:
+            spot["band"] = "80M"
+        elif freq >= 7000.0 and freq <= 7300.0:
+            spot["band"] = "40M"
+        elif freq >= 10100.0 and freq <= 10150.0:
+            spot["band"] = "30M"
+        elif freq >= 14000.0 and freq <= 14350.0:
+            spot["band"] = "20M"
+        elif freq >= 18068.0 and freq <= 18168.0:
+            spot["band"] = "17M"
+        elif freq >= 21000.0 and freq <= 21450.0:
+            spot["band"] = "15M"
+        elif freq >= 24890.0 and freq <= 24990.0:
+            spot["band"] = "12M"
+        elif freq >= 28000.0 and freq <= 29700.0:
+            spot["band"] = "10M"
+        elif freq >= 50000.0 and freq <= 52000.0:
+            spot["band"] = "6M"
+        elif freq >= 70000.0 and freq <= 70500.0:
+            spot["band"] = "4M"
+        elif freq >= 144000.0 and freq <= 148000.0:
+            spot["band"] = "2M"
+        elif freq >= 430000.0 and freq <= 440000.0:
+            spot["band"] = "70CM"
+        elif freq >= 1240000.0 and freq <= 1300000.0:
+            spot["band"] = "23CM"
+        else:
+            spot["band"] = "unknown"
+    return spots
+
+
+def getSpotComments(call, park):
+    url = f"https://api.pota.app/spot/comments/{encodeCall(call)}/{park}/"
+    cfg = cacheConfig['spotComments']
+    comments = callJsonList(url, cfg.genName(call, park), cfg.holdTime)
+    return comments
+
+
+###############################################################################
+#                               Output routines                               #
+###############################################################################
+
+
+def outputCallActivations(activations):
+    global jsonOutput
+    if jsonOutput:
+        printJson(activations)
+        return
+
+    # The date string compares alphabetically
+    sortedActivations = sorted(activations, key = lambda act : act["date"])
+    for act in sortedActivations:
+        park = act["reference"]
+        cw = act["cw"]
+        data = act["data"]
+        phone = act["phone"]
+        total = act["total"]
+        print(f'{act["date"]}: {park} (cw: {cw}, data: {data}, phone: {phone}, total: {total})')
+
+
+def outputParkActivations(activations):
+    global jsonOutput
+    if jsonOutput:
+        printJson(activations)
+        return
+
+    # The date string compares alphabetically
+    sortedActivations = sorted(activations, key = lambda act : act["qso_date"])
+    for act in sortedActivations:
+        d = act["qso_date"]
+        date = f'{d[:4]}-{d[4:6]}-{d[6:8]}'
+        call = act["activeCallsign"]
+        cw = act["qsosCW"]
+        data = act["qsosDATA"]
+        phone = act["qsosPHONE"]
+        total = act["totalQSOs"]
+        print(f'{date}: {call} (cw: {cw}, data: {data}, phone: {phone}, total: {total})')
+
+
+def outputAwards(awards):
+    global jsonOutput
+    if jsonOutput:
+        printJson(awards)
+        return
+
+    # The ISO time string compares alphabetically
+    sortedAwards = sorted(awards, key = lambda award : award["granted"])
+    for award in sortedAwards:
+        endorsements = award["endorsements"]
+        e = "" if len(endorsements) == 0 else f'({", ".join(endorsements)})'
+        print(f'{award["granted"][:10]}: {award["name"]} {e}')
+
+
+def outputCountries(countries):
+    global jsonOutput
+    if jsonOutput:
+        printJson(countries)
+        return
+
+    for c in countries:
+        ecount = c["entities"]
+        e = "entity" if ecount == 1 else "entities"
+        pcount = c["parks"]
+        p = "park" if pcount == 1 else "parks"
+        print(f'{withColon(c["prefix"]):<8}{c["name"]} ({ecount} {e}, {pcount} {p})')
+
+
+def outputLeaderboard(data):
+    global jsonOutput
+    if jsonOutput:
+        printJson(data)
+        return
+
+    print(f'Park Leaders by Activations:')
+    for act in data["activations"]:
+        print(f'  {act["callsign"]:<16s}{act["count"]}')
+    print()
+
+    print(f'Park Leaders by QSOs:')
+    for act in data["activator_qsos"]:
+        print(f'  {act["callsign"]:<16s}{act["count"]}')
+    print()
+
+    print(f'Park Leaders by Hunter QSOs:')
+    for act in data["hunter_qsos"]:
+        print(f'  {act["callsign"]:<16s}{act["count"]}')
+    print()
+
+
+def outputLocations(locations):
+    global jsonOutput
+    if jsonOutput:
+        printJson(locations)
+        return
+
+    for loc in locations:
+        header = f'{loc["locationDesc"]}:'
+        print(f'{header:<12s}{loc["entityName"]} / {loc["locationName"]}')
+
+
+def outputCallMayor(data):
+    global jsonOutput
+    if jsonOutput:
+        printJson(data)
+        return
+
+    sortedData = sorted(data, key = lambda entry: entry["reference"])
+    for entry in sortedData:
+        header = f'{entry["reference"]}:'.ljust(16)
+        print(f'{header}{entry["role"]} ({entry["count"]})')
+
+
+def outputParkMayor(data):
+    global jsonOutput
+    if jsonOutput:
+        printJson(data)
+        return
+
+    for entry in data:
+        header = f'{entry["callsign"]}:'.ljust(16)
+        print(f'{header}{entry["role"]} ({entry["count"]})')
+
+
+def outputParks(parks):
+    global jsonOutput
+    if jsonOutput:
+        printJson(parks)
+        return
+
+    for park in parks:
+        print(f'===== {park["reference"]} =====')
+        print(f'Name:                   {park["name"]}')
+        print(f'Regions:                {park["locationDesc"]}')
+        print(f'Activations:            {park["activations"]}')
+        print(f'Attempts:               {park["attempts"]}')
+        print(f'QSOs:                   {park["qsos"]}')
+        if "firstActivator" in park:
+            activator = park["firstActivator"]
+            if activator != "":
+                print(f'First activated:        {park["firstActivationDate"]} by {activator}')
+            else:
+                print(f'First activated:        never')
+
+def outputCallProfile(profile):
+    global jsonOutput
+    if jsonOutput:
+        printJson(profile)
+        return
+
+    stats = profile["stats"]
+    activator = stats["activator"]
+    attempts = stats["attempts"]
+    hunter = stats["hunter"]
+
+    print(f'===== {profile["callsign"]} - {profile["name"]} =====')
+    print(f'QTH:                    {profile["qth"]}')
+    print(f'Other callsigns:        {", ".join(profile["other_callsigns"])}')
+    print(f'Activations:            {activator["activations"]} / {attempts["activations"]}')
+    print(f'Parks activated:        {activator["parks"]} / {attempts["parks"]}')
+    print(f'Activation QSOs:        {activator["qsos"]} / {attempts["qsos"]}')
+    print(f'Parks hunted:           {hunter["parks"]}')
+    print(f'Hunter QSOs:            {hunter["qsos"]}')
+    print(f'Awards:                 {stats["awards"]}')
+    print(f'Endorsements:           {stats["endorsements"]}')
+    print('')
+
+
+def outputParkProfile(profile):
+    global jsonOutput
+    if jsonOutput:
+        printJson(profile)
+        return
+
+    print(f'===== {profile["name"]} {profile["parktypeDesc"]} =====')
+    print(f'Reference:              {profile["reference"]}')
+    print(f'Entity:                 {profile["entityName"]}')
+    print(f'Location(s):            {profile["locationDesc"]}')
+    print(f'Active:                 {"yes" if profile["active"] else "no"}')
+    if "firstActivator" in profile:
+        print(f'First activation:       {profile["firstActivator"]} on {profile["firstActivationDate"]}')
+    else:
+        print(f'First activation:       never')
+    print('')
+
+
+def outputRegions(regions):
+    global jsonOutput
+    if jsonOutput:
+        printJson(regions)
+        return
+
+    for r in regions:
+        print(f'{withColon(r["descriptor"]):<8}{r["name"]} ({r["parks"]} parks)')
+
+
+def outputCallStats(stats):
+    global jsonOutput
+    if jsonOutput:
+        printJson(stats)
+        return
+
+    print(f'===== {stats["callsign"]} =====')
+    print(f'Name:                   {stats["name"]}')
+    print(f'QTH:                    {stats["qth"]}')
+    print(f'Successful activations: {stats["activator"]["activations"]}')
+    print(f'Activated parks:        {stats["activator"]["parks"]}')
+    print(f'Activation QSOs:        {stats["activator"]["qsos"]}')
+    print(f'Hunted parks:           {stats["hunter"]["parks"]}')
+    print(f'Hunter QSOs:            {stats["hunter"]["qsos"]}')
+    print(f'Awards:                 {stats["awards"]}')
+    print(f'Endorsements:           {stats["endorsements"]}')
+    print('')
+
+def outputParkStats(stats):
+    global jsonOutput
+    if jsonOutput:
+        printJson(stats)
+        return
+
+    print(f'===== {stats["reference"]} =====')
+    print(f'Successful activations: {stats["activations"]}')
+    print(f'Activation attempts:    {stats["attempts"]}')
+    print(f'QSOs:                   {stats["contacts"]}')
+    print('')
+
+
+def outputSpots(spots):
+    global jsonOutput
+    if jsonOutput:
+        printJson(spots)
+        return
+
+    for spot in spots:
+        print(f'===== {spot["activator"]} @ {spot["reference"]} =====')
+        print(f'Location:    {spot["reference"]} {spot["name"]}')
+        print(f'Region:      {spot["locationDesc"]}')
+        # "mode" and "frequency" are duplicated below but we print it also
+        # here for better visibility
+        print(f'Mode:        {spot["mode"]}')
+        print(f'Frequency:   {spot["frequency"]}')
+        spotters = spot["spotters"]
+        for spotter in spotters:
+            spotTime = datetime.datetime.fromisoformat(spotter["spotTime"])
+            spottedBy = spotter["spotter"]
+            time = spotTime.strftime("%H:%M:%S")
+            mode = spotter["mode"]
+            frequency = spotter["frequency"]
+            comment = spotter["comments"]
+            comment = f' ("{comment}")' if comment != '' else ''
+            print(f'Spotted:     {time} by {spottedBy} in {mode} at {frequency}{comment}')
+        print('')
+
+
+###############################################################################
+#                          Command handling functions                         #
+###############################################################################
+
+
+def readActivations(args):
+    # Parse the command arguments. We accept -u to include unsuccessful ones.
+    opts, tokens = getOpt(args, 'u', [ 'unsuccessful' ])
+    unsuccessful = False
+    for opt, arg in opts:
+        if opt in [ '-u', '--unsuccessful' ]:
+            unsuccessful = True
+
+    # Call or park id is mandatory argument
+    requireArg(tokens, "activations")
+    arg = tokens[0].upper()
+
+    if isPark(arg):
+        activations = getParkActivations(arg)
+        if not unsuccessful:
+            activations = filterList(activations, lambda e: int(e["totalQSOs"]) >= 10)
+        outputParkActivations(activations)
+    else:
+        activations = getCallActivations(arg)
+        if not unsuccessful:
+            activations = filterList(activations, lambda e: int(e["total"]) >= 10)
+        outputCallActivations(activations)
+
+
+def readAwards(args):
+    # Call is mandatory argument
+    requireArg(args, "awards")
+    call = args[0].upper()
+
+    outputAwards(getAwards(call))
+
+
+def cleanupCache(args):
+    global cleanupConfig
+
+    # We cannot cleanup if we aren't allowed to write the cache
+    if not writeCache:
+        error("Command \"cleanup\" requires writing to the cache directory")
+    # Get the current time once
+    now = time.time()
+    # Process all entries in the cache. We cannot delete files while iterating
+    # so collect them first and delete later.
+    outdatedEntries = [ ]
+    errors = False
+    try:
+        for entry in cacheDir.iterdir():
+            # Check if this is a known cache entry
+            if not entry.is_file():
+                errors = True
+                print(f"Non file entry in cache directory: {entry}", file = sys.stderr)
+                continue
+            m = re.search('^[a-z]+', entry.name, re.IGNORECASE)
+            key = None if m == None else cleanupConfig.get(m[0])
+            if key == None:
+                errors = True
+                print(f"Unknown file in cache directory: {entry}", file = sys.stderr)
+                continue
+            # Check the files age
+            maxAge = cacheConfig[key].holdTime
+            res = entry.stat()
+            if res.st_mtime < now - maxAge:
+                outdatedEntries.append(entry)
+                debug(f"Outdated cache file: {entry}")
+            else:
+                debug(f"File is still hot: {entry}")
+        # Remove all outdated entries
+        for entry in outdatedEntries:
+            debug(f"Removing {entry}")
+            entry.unlink()
+    except Exception as e:
+        error(f"Error in cleanup: {e}")
+    # Return a non zero exit code if something was suspicious
+    if errors:
+        exit(1)
+
+
+def readCountries(args):
+    noArgs(args, "programs")
+    # Replace the entities by their count
+    countries = getCountries()
+    for country in countries:
+        country["entities"] = len(country["entities"])
+    outputCountries(countries)
+
+
+def printHelp(args):
+    noArgs(args, "help")
+    print(
+"""Usage: pota [global options] cmd [cmd options] [arguments]
+
+Please note that order is important on the command line!
+
+Available global options are:
+  -c <dir>, --cachedir <dir>    Use this directory for cache files
+  -f, --fromcache               Work only with the cache, no downloads
+  -d, --debug                   Enable debug output
+  -j, --json                    Output json data instead of text
+  -l <sec>, --ratelimit <sec>   Rate limit API calls
+  -n, --nocache                 Do not read or write cached data
+  -r, --nocacheread             Do not read from the cache
+  -w, --nowritecache            Do not write to the cache
+
+Options -r/-w and -f cannot be used together. If -f is given, the cached data
+is used regardless of its age. Commands with lots of API calls will
+automatically enable rate limiting if not disabled on the command line.
+
+Available commands and their arguments are:
+
+activations [options] <call|park>
+  Print activations for a park or call. For a park, all activations are shown,
+  for a call only up to 25 recent ones. Command options:
+    -u, --unsuccessful          Include unsuccessful activations
+
+awards <call>
+  Show the awards for a call.
+
+cleanup
+  Cleanup the cache. Remove all outdated data.
+
+countries
+  Print all countries.
+
+leaderboard <park>
+  Print the leader board for a park.
+
+mayor <call|park>
+  Print the mayor for a park or print all parks where a user is the mayor (*).
+  For a call, only the parks from the last 25 activations are considered.
+  Command options:
+    -q, --qsos                  Use QSO count instead of activations
+
+parks [country|region]
+  Print parks sorted by park reference. Output may be limited to a single
+  country or a region. Command options:
+    -a, --activations           Sort by number of activations
+    -f, --first                 Add first activation info (*)
+    -q, --qsos                  Sort by number of qsos
+
+profile <call|park>
+  Print the profile for a call or park.
+
+regions [country]
+  Print regions. Output may be limited to a single country.
+
+spots [options]
+  Print currently active spots. Command options:
+    -f f, --filter f            Add a filter for the displayed spots.
+    -q, --qrt                   Include spots marked as qrt.
+    -r, --rbn                   Print all spotters including RBN (*)
+    -s, --spotters              Print all spotters w/o RBN (*)
+  Filter tokens can be bands, calls, modes, parks, regions or countries. All
+  filter tokens are compared in full, so you cannot use 'DE-00' to include
+  just a subset of parks (those starting with 'DE-00').
+  Multiple tokens can be added to one filter separated by commas. In this case
+  they are \"or\" combined. Multiple filters specified with -f are \"and\"
+  combined. So
+    pota spots -f 20m,cw
+  prints all spots for 20m and all spots using mode CW, while
+    pota spots -f 20m -f cw
+  prints all spots for 20m that are using mode CW.
+  Filter tokens may be negated using '^' as prefix. So
+    pota spots -f ^ft8
+  shows all spots except those using FT8. Please note that using negations
+  with token lists is almost useless.
+    pota spots -f ^ft4,ft8
+  will show all spots that aren't FT4 *OR* FT8 which actually means that all
+  spots will be shown.
+
+stats <call|park>
+  Print statistics for a call or park.
+
+version
+  Print the software version.
+
+Options marked with (*) will cause additional API calls and will automatically
+apply rate limiting which increases command execution times. It is possible to
+override rate limiting by adding '-l 0' to the command line but please note
+that this stresses the POTA servers and is rather unfriendly.
+""")
+
+
+def readLeaderboard(args):
+    # Park id is mandatory argument
+    requireArg(args, "leaderboard")
+    arg = args[0].upper()
+    if not isPark(arg):
+        error(f"Not a valid park id: {arg}")
+
+    outputLeaderboard(getLeaderboard(arg))
+
+
+def readLocations(args):
+    # No arguments
+    noArgs(args, "locations")
+
+    locations = sorted(getLocations(), key = lambda loc : loc["locationDesc"])
+    outputLocations(locations)
+
+
+def readMayor(args):
+    global rateLimit, defaultRateLimit
+
+    # Parse the command arguments. We accept -q to use the QSO count for
+    # determining the mayor. The call or park id is a mandatory argument.
+    opts, tokens = getOpt(args, 'q', [ 'qsos' ])
+    requireArg(tokens, "mayor")
+    boardName = "activations"
+    for opt, arg in opts:
+        if opt in [ '-q', '--qsos' ]:
+            boardName = "activator_qsos"
+    arg = tokens[0].upper()
+
+    result = [ ]
+    if isPark(arg):
+        response = getLeaderboard(arg)
+        if not boardName in response:
+            error("Data error in response")
+        activations = response[boardName]
+        if len(activations) >= 1:
+            result.append({
+                "reference": arg,
+                "callsign": activations[0]["callsign"],
+                "role": "mayor",
+                "count": activations[0]["count"]
+            })
+        if len(activations) >= 2:
+            result.append({
+                "reference": arg,
+                "callsign": activations[1]["callsign"],
+                "role": "deputy",
+                "count": activations[1]["count"]
+            })
+        outputParkMayor(result)
+
+    else:
+        # First grab the profile and read all activated parks
+        activations = getCallActivations(arg)
+        # Collect the parks removing duplicates
+        parks = { }
+        for act in activations:
+            parks[act["reference"]] = True
+        # Apply rate limiting if not overriden from the command line and if the
+        # number of parks exceeds a threshold.
+        if rateLimit == None and len(parks) > 3:
+            rateLimit = defaultRateLimit
+        # Walk over the parks checking mayor status
+        for park in parks.keys():
+            leaderboard = getLeaderboard(park)
+            if not boardName in leaderboard:
+                error("Data error in response")
+            pAct = leaderboard[boardName]
+            if len(pAct) >= 1 and pAct[0]["callsign"] == arg:
+                result.append({
+                    "reference": f"{park}",
+                    "callsign": arg,
+                    "role": "mayor",
+                    "count": f'{pAct[0]["count"]}'
+                })
+            elif len(activations) >= 2 and pAct[1]["callsign"] == arg:
+                result.append({
+                    "reference": f"{park}",
+                    "callsign": arg,
+                    "role": "deputy",
+                    "count": f'{pAct[0]["count"]}'
+                })
+
+        outputCallMayor(result)
+
+
+def readProfile(args):
+    # Call or park is mandatory argument
+    requireArg(args, "profile")
+    arg = args[0].upper()
+    if isPark(arg):
+        outputParkProfile(getParkProfile(arg))
+    else:
+        outputCallProfile(getCallProfile(arg))
+
+
+def readParks(args):
+    global defaultRateLimit, rateLimit
+
+    # Parse the command arguments. We accept -a to sort by activations, -q to
+    # sort by number of QSOs.
+    opts, tokens = getOpt(args, 'afq', [ 'activations', 'first', 'qsos' ])
+    sortKey = None
+    firstAct = False
+    for opt, arg in opts:
+        if opt in [ '-a', '-activations' ]:
+            if sortKey != None:
+                error("Cannot specify multiple sort options")
+            sortKey = "activations"
+        elif opt in [ '-f', '--first' ]:
+            firstAct = True
+        elif opt in [ '-q', '--qsos' ]:
+            if sortKey != None:
+                error("Cannot specify multiple sort options")
+            sortKey = "qsos"
+
+    # There may be a country or region argument.
+    regions = [ ]
+    if len(tokens) == 0:
+        r = getRegions()
+        for region in r:
+            regions.append(region["descriptor"])
+    elif len(tokens) == 1:
+        arg = tokens[0].upper()
+        if isCountry(arg):
+            r = getRegions(arg)
+            for region in r:
+                regions.append(region["descriptor"])
+        elif isRegion(arg):
+            regions.append(arg)
+        else:
+            error("Not a valid country or region: {arg}")
+    else:
+        error("Too many arguments for \"parks\"")
+
+    # Apply rate limiting if not overriden from the command line and if the
+    # number of regions exceeds a threshold.
+    if rateLimit == None and (firstAct or len(regions) > 3):
+        rateLimit = defaultRateLimit
+
+    # Read the parks for all regions. Take care that parks that span multiple
+    # regions are just added once.
+    parks = [ ]
+    addedRefs = { }
+    for r in regions:
+        for park in getParks(r):
+            ref = park["reference"]
+            if not ref in addedRefs:
+                parks.append(park)
+                addedRefs[ref] = True
+
+    # If requested, add information about the first activation. This causes a
+    # lot of API calls (one per park).
+    if firstAct:
+        for park in parks:
+            profile = getParkProfile(park["reference"])
+            if "firstActivator" in profile:
+                park["firstActivator"] = profile["firstActivator"]
+                park["firstActivationDate"] = profile["firstActivationDate"]
+            else:
+                park["firstActivator"] = ""
+
+    # Sort the parks as required. Default sort key is reference.
+    if sortKey == None:
+        sortKey = "reference"
+    parks = sorted(parks, key = lambda p: p[sortKey])
+
+    # Finally output the parks
+    outputParks(parks)
+
+
+def readRegions(args):
+    # May be followed by a country.
+    if len(args) == 0:
+        regions = getRegions()
+    elif len(args) == 1:
+        arg = args[0].upper()
+        if not isCountry(arg):
+            error("Not a valid country: {arg}")
+        regions = getRegions(arg)
+    else:
+        error("Too many arguments for \"regions\"")
+
+    # Output them sorted by descriptor
+    outputRegions(sorted(regions, key = lambda r: r["descriptor"]))
+
+
+def readSpots(args):
+    global defaultRateLimit, rateLimit
+
+    # Parse the command arguments. We accept -q to include spots marked as qrt
+    # and -f to add filters
+    opts, tokens = getOpt(args, 'f:qrs', [ 'filter', 'qrt', 'rbn', 'spotters' ])
+    noArgs(tokens, "spots")
+    qrt = False
+    addSpotters = 0
+    filters = [ ]
+    for opt, arg in opts:
+        if opt in [ '-f', '--filter' ]:
+            filters.append(arg.split(","))
+        elif opt in [ '-q', '--qrt' ]:
+            qrt = True
+        elif opt in [ '-r', '--rbn' ]:
+            addSpotters = 2
+        elif opt in [ '-s', '--spotters' ]:
+            if addSpotters == 0:
+                addSpotters = 1
+
+    # Get all spots
+    spots = getSpots()
+
+    # Filter the spots as required.
+    if not qrt:
+        spots = filterList(spots, lambda spot: not "qrt" in spot["comments"].lower())
+
+    # Within one filter, tokens are combined with "or", multiple filters are
+    # combined with "and".
+    for f in filters:
+        validSpots = [ ]
+        for spot in spots:
+            for filterTok in f:
+                tok = filterTok.upper()
+                expected = not tok.startswith("^")
+                if not expected:
+                    tok = tok[1:]
+                if isPark(tok):
+                    result = (spot["reference"] == tok)
+                elif isRegion(tok):
+                    result = (tok in spot["locationDesc"])
+                elif isBand(tok):
+                    result = (spot["band"] == tok)
+                elif isMode(tok):
+                    result = (spot["mode"] == tok)
+                elif isCountry(tok):
+                    # Country is the first two letters of the park reference
+                    result = (spot["reference"][:2] == tok)
+                else:
+                    result = (spot["activator"] == tok)
+                if expected == result:
+                    validSpots.append(spot)
+                    # No need to run more filters
+                    break
+        spots = validSpots
+        if len(spots) == 0:
+            break
+
+    # If full comments are requested, add them. This requires one API call per
+    # spot, so apply rate limiting depending on the number of spots. If there
+    # is no request for full comments, unify the data by placing spotter data
+    # into a dict similar as with full comments.
+    if addSpotters != 0:
+        if rateLimit == None and len(spots) > 3:
+            rateLimit = defaultRateLimit
+        for spot in spots:
+            comments = getSpotComments(spot["activator"], spot["reference"])
+            if addSpotters < 2:
+                comments = filterList(comments, lambda c: not c["spotter"].endswith("#"))
+            spot["spotters"] = comments
+    else:
+        for spot in spots:
+            spot["spotters"] = [ {
+                'spotter':   spot["spotter"],
+                'spotTime':  spot["spotTime"],
+                'mode':      spot["mode"],
+                'frequency': spot["frequency"],
+                'band':      spot["band"],
+                'comments':  spot["comments"]
+            } ]
+
+    outputSpots(spots)
+
+
+def readStats(args):
+    # Call or park id is mandatory argument
+    requireArg(args, "stats")
+    arg = args[0].upper()
+    if isPark(arg):
+        outputParkStats(getParkStats(arg))
+    else:
+        outputCallStats(getCallStats(arg))
+
+
+def printVersion(args):
+    noArgs(args, "version")
+    svnId = "$Id: pota 3674 2024-12-03 10:49:21Z uz $"
+    pId = '\d+'
+    pDate = '\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}'
+    pUser = '\w+'
+    m = re.search(f'^\\$Id: pota ({pId}) ({pDate})Z ({pUser}) \\$$', svnId)
+    if m != None:
+        print(f'Version {m[1]}, last changed on {m[2]} by {m[3]}')
+    else:
+        print("unknown")
+
+
+###############################################################################
+#                                Main program                                 #
+###############################################################################
+
+
+def main():
+    global cacheDir, fromCache, debugOutput, jsonOutput, rateLimit
+    global readCache, writeCache
+
+    # Parse command line options
+    opts, args = getOpt(
+                     sys.argv[1:],
+                     'c:dfjl:rw',
+                     [
+                         'cachedir=',
+                         'debug',
+                         'fromcache',
+                         'json',
+                         'nocacheread',
+                         'nocachewrite',
+                         'ratelimit='
+                     ]
+                 )
+
+    # Handle options
+    for opt, arg in opts:
+        if opt in [ '-c', '--cachedir' ]:
+            cacheDir = Path(arg)
+        elif opt in [ '-d', '--debug' ]:
+            debugOutput = True
+        elif opt in [ '-f', '--fromcache' ]:
+            fromCache = True
+        elif opt in [ '-j', '--json' ]:
+            jsonOutput = True
+        elif opt in [ '-l', '--ratelimit' ]:
+            try:
+                rateLimit = float(arg)
+            except ValueError:
+                error(f'Argument to {opt} must be a floating point value')
+            if rateLimit < 0.0:
+                error(f'Argument to {opt} must not be negative')
+        elif opt in [ '-r', '--nocacheread' ]:
+            readCache = False
+        elif opt in [ '-w', '--nocachewrite' ]:
+            writeCache = False
+
+    if not readCache:
+        if fromCache:
+            error("Options -r and -f cannot be used together")
+        debug("Reading from cache is disabled via command line")
+    if not writeCache:
+        if fromCache:
+            error("Options -w and -f cannot be used together")
+        debug("Writing to cache is disabled via command line")
+
+    # Setup/create the cache directory
+    if cacheDir == None:
+        cacheDir = Path.home() / ".local" / "share" / "pota"
+    if writeCache and not cacheDir.exists():
+        debug(f"Creating cache directory {cacheDir}")
+        try:
+            cacheDir.mkdir(mode = 0o700, parents = True, exist_ok = True)
+        except e as Exception:
+            error(f"Error creating {cacheDir}: {e}")
+    debug(f"Cache directory is {cacheDir}")
+
+    # Handle commands
+    if len(args) == 0:
+        error("No command given - use \"pota help\" for help")
+    cmd = args[0]
+    if cmd == "activations":
+        readActivations(args[1:])
+    elif cmd == "awards":
+        readAwards(args[1:])
+    elif cmd == "cleanup":
+        cleanupCache(args[1:])
+    elif cmd == "countries":
+        readCountries(args[1:])
+    elif cmd == "help":
+        printHelp(args[1:])
+    elif cmd == "leaderboard":
+        readLeaderboard(args[1:])
+    elif cmd == "locations":
+        readLocations(args[1:])
+    elif cmd == "mayor":
+        readMayor(args[1:])
+    elif cmd == "parks":
+        readParks(args[1:])
+    elif cmd == "profile":
+        readProfile(args[1:])
+    elif cmd == "regions":
+        readRegions(args[1:])
+    elif cmd == "spots":
+        readSpots(args[1:])
+    elif cmd == "stats":
+        readStats(args[1:])
+    elif cmd == "version":
+        printVersion(args[1:])
+    else:
+        error(f"Unknown command \"{cmd}\"")
+
+    # Done
+    exit(0)
+
+
+if __name__ == "__main__":
+    main()
+
