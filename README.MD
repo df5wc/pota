@@ -9,7 +9,7 @@ Some information bits and caveats:
 * Linux support only. I haven't written this for windows nor do I have any plans for windows support. You may be able to use it in WSL however.
 * The program uses the *unofficial* POTA API because there is no official one. It may stop working every day because of changes to the API.
 * The program uses caching and rate limiting in order to behave friendly to the pota servers. This behavior may be changed from the command line. Please act responsibly.
-* I'm no python programmer, so the code is probably awful to read for anybody who one. Be prepared.
+* I'm no python programmer, so the code is probably awful to read for anybody who is one. Be prepared.
 * The original version is not hosted on github. Github is just used for distribution. So instead of writing issues you may prefer to contact me directly.
 * This software was written as a playground for me. So there might be changes and additions here and there, but there's no concrete plan for anything.
 * The tool is able to output json so you may use it in other scripts that postprocess the json data.
