@@ -6,6 +6,7 @@ Some information bits and caveats:
 
 * This is command line only! If you aren't someone doing most of your work on the command line, it is probably not for you.
 * The tool was written in Python. I doesn't use anything fancy but I cannot say which python version is actually required. I'm using python 3.8 which works.
+* The Python `requests` library is required. It is usually a separate package in your Linux distribution or may be installed using `pip install requests`.
 * Linux support only. I haven't written this for windows nor do I have any plans for windows support. You may be able to use it in WSL however.
 * The program uses the *unofficial* POTA API because there is no official one. It may stop working every day because of changes to the API.
 * The program uses caching and rate limiting in order to behave friendly to the pota servers. This behavior may be changed from the command line. Please act responsibly.
