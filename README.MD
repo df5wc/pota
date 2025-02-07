@@ -1,6 +1,6 @@
 # A POTA tool
 
-This repository contains a small tool written in python that allows to query the POTA API from the command line. See below for the help text which is also output by `pota help`.
+This repository contains a small tool written in python that allows to query the POTA API from the command line. You can for example query current spots and filter them by mode, band or other stuff. It allows to query call profiles, park statistics and more. See the help text below for a more detailed explanation. The help text is also output by `pota help`.
 
 Some information bits and caveats:
 
