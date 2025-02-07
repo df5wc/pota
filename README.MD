@@ -48,14 +48,23 @@ awards <call>
 cleanup
   Cleanup the cache. Remove all outdated data.
 
+config name[=value]
+  Query or set configuration variables.
+  Currently supported:
+    general.callsign    The callsign of the user. Used when spotting.
+
+  The configuration is stored in a file named '.pota' in the users home
+  directory.
+
 countries
   Print all countries.
 
 leaderboard <park>
   Print the leader board for a park.
 
-mayor <call|park>
-  Print the mayor for a park or print all parks where a user is the mayor (*).
+mayor <call|park|region(*)|country(*)>
+  Print the mayor for a park, all parks in a region or country or print all
+  parks where a user is the mayor (*).
   For a call, only the parks from the last 25 activations are considered.
   Command options:
     -q, --qsos                  Use QSO count instead of activations
@@ -72,6 +81,20 @@ profile <call|park>
 
 regions [country]
   Print regions. Output may be limited to a single country.
+
+spot [options] call@park freq [mode]
+  Post a spot. Command options:
+    -c text, --comment text     Post using this text as comment.
+  The call@park, freq and mode arguments can be specified in any order. They
+  are detected from their syntax. If no mode is given, SSB is assumed. The
+  frequency must be specified in kilohertz and may include trailing digits.
+
+  The spotters callsign is taken from the configuration. See the config
+  command on how to set it.
+
+  Example:
+    pota spot df5wc@de-0008 14032.1 cw -c "thanks, 73!"
+
 
 spots [options]
   Print currently active spots. Command options:
@@ -107,6 +130,7 @@ Options marked with (*) will cause additional API calls and will automatically
 apply rate limiting which increases command execution times. It is possible to
 override rate limiting by adding '-l 0' to the command line but please note
 that this stresses the POTA servers and is rather unfriendly.
+
 ```
 
 
