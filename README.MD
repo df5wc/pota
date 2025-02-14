@@ -43,6 +43,48 @@ activations [options] <call|park>
   for a call only up to 25 recent ones. Command options:
     -u, --unsuccessful          Include unsuccessful activations
 
+activators [options]
+  Print a list of all activators, the number of activations and the number of
+  contacts.
+    -a, --activations           Sort by number of activations instead of call
+    -c <regex>, --call <regex>  Extract calls that match the given regex
+    -m <modes>, --mode <modes>  Filter by modes (see below)
+    -t, --totals                Add a line with totals
+    -T, --TOTALS                Print just one line with totals
+    -y <years>, --year <years>  Limit data to the given year (or years)
+  The regular expression given to '-c' is a real regex that must match the
+  full call sign. It behaves as if it were enclosed in '^...$'. This allows
+  to prefix a call filter regex with '^' which negates it. Multiple call
+  filters may be used which are 'and' combined. So
+    pota activators -a -y 2025 -c 'd[a-r].*' -c '^df5.*'
+  prints the list of activators in 2025 with german call signs but excludes
+  the ones starting with 'DF5'.
+  Entries can be filtered by modes and number of QSOs in this mode. Valid modes
+  are 'cw', 'data' or 'phone'. A mode string may just contain a mode name or
+  include a comparison operator and a number appended. If there is an
+  additional percent sign, the percentage of QSOs in this mode is compared. If
+  just a mode is given, a QSO count > 0 is tested. So '-m cw>100' filters all
+  activators with more than 100 cw QSOs. '-m cw>50%' applies to all activators
+  with more than 50% of their total QSOs in cw. As usual, a match can be
+  inverted by prefixing the filter with '^'. More than one mode filter can be
+  specified by separating the expressions using commas. In this case the
+  filters are 'or' combined. Filters in separate '-m' arguments are 'and'
+  combined.
+  The '-y' option accepts a single year or a comma separated list of years.
+  Example that outputs data from 2024 and 2025 for all call signs starting
+  with 'DF5':
+    pota activators -y 24,2025 -c 'df5.*'
+  Output activators with german call signs from 2025 that have cw qsos:
+    pota activators -y 2025 -c 'd[a-r].*' -m cw
+  Same as above but with cw only:
+    pota activators -y 2025 -c 'd[a-r].*' -m cw -m ^data -m ^phone
+  Another way to say the same:
+    pota activators -y 2025 -c 'd[a-r].*' -m '^cw<100%'
+  Ranking (most activations first) for 2024 excluding data operators:
+    pota activators -a -y 2024 -m ^data
+  Output all activators that do mostly cw:
+    pota activators -a -m 'cw>90%'
+
 awards <call>
   Show the awards for a call.
 
@@ -131,7 +173,4 @@ Options marked with (*) will cause additional API calls and will automatically
 apply rate limiting which increases command execution times. It is possible to
 override rate limiting by adding '-l 0' to the command line but please note
 that this stresses the POTA servers and is rather unfriendly.
-
 ```
-
-

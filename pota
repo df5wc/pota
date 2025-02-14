@@ -9,12 +9,12 @@ import getopt
 import json
 import os
 import re
-import requests
 import sys
 import time
 from typing import Callable
 from dataclasses import dataclass
 from pathlib import Path
+import requests
 
 
 ###############################################################################
@@ -53,6 +53,8 @@ class CacheDef:
     genName:    Callable[[str, str], str]
 
 cacheConfig = {
+    'activator':
+        CacheDef(1 * DAY, lambda year, _u1 = "": f"activator{'' if year is None else f'-{year}'}.json"),
     'callProfile':
         CacheDef(2 * HOUR, lambda call, _u1 = "": f"callprofile-{call}.json"),
     'callStats':
@@ -81,6 +83,7 @@ cacheConfig = {
 
 cleanupConfig = {
     'activations':      'parkActivations',
+    'activator':        'activator',
     'programs':         'countries',
     'leaderboard':      'leaderboard',
     'locations':        'locations',
@@ -102,7 +105,7 @@ cleanupConfig = {
 # Print an error to stderr and exit
 def error(msg):
     print(f"Error: {msg}", file = sys.stderr)
-    exit(1)
+    sys.exit(1)
 
 
 # Print a debug message to stderr if debug output is enabled
@@ -112,7 +115,9 @@ def debug(msg):
 
 
 # Get options with error checking
-def getOpt(args, shortopts, longopts = [], useGnu = False):
+def getOpt(args, shortopts, longopts = None, useGnu = False):
+    if longopts is None:
+        longopts = []
     try:
         if useGnu:
             return getopt.gnu_getopt(args, shortopts, longopts)
@@ -142,42 +147,51 @@ def printJson(text):
 
 # Check if the given token is a ham radio band
 def isBand(token):
-    return re.search("^[0-9]+C?M$", token, flags = re.I) != None
+    return re.search("^[0-9]+C?M$", token, flags = re.I) is not  None
 
 
 # Check if the given token is an operating mode
 def isMode(token):
-    return re.search("^(AM|CW|DATA|FM|FT4|FT8|PHONE|PSK31|RTTY|SSB|SSTV)$", token, flags = re.I) != None
+    return re.search("^(AM|CW|DATA|FM|FT4|FT8|PHONE|PSK31|RTTY|SSB|SSTV)$", token, flags = re.I) is not None
 
 
 # Check if the given token is a park id
 def isPark(token):
-    return re.search("^([A-Z]{2}-[0-9]{4}|K-TEST)$", token, flags = re.I) != None
+    return re.search("^([A-Z]{2}-[0-9]{4}|K-TEST)$", token, flags = re.I) is not None
 
 
 # Check if the given token denotes a region
 def isRegion(token):
-    return re.search("^[A-Z]{2}-[A-Z]{2,3}$", token, flags = re.I) != None
+    return re.search("^[A-Z]{2}-[A-Z]{2,3}$", token, flags = re.I) is not None
 
 
 # Check if the given token denotes a country
 def isCountry(token):
-    return re.search("^[A-Z]{2}$", token, flags = re.I) != None
+    return re.search("^[A-Z]{2}$", token, flags = re.I) is not None
 
 
 # Check if the given token denotes a frequency
 def isFreq(token):
-    return re.search("^[0-9]+(\\.[0-9]*)?$", token) != None
+    return re.search("^[0-9]+(\\.[0-9]*)?$", token) is not None
+
+
+# Check if s string is a valid regex
+def isValidRegEx(regex):
+    try:
+        re.compile(regex)
+        return True
+    except re.error:
+        return False
 
 
 # Return program information from SVN in a dict
 def getVersion():
-    svnId = "$Id: pota 3684 2025-02-02 13:37:01Z uz $"
-    id = '\\d+'
-    date = '\\d{4}-\\d{2}-\\d{2} \\d{2}:\\d{2}:\\d{2}'
-    user = '\\w+'
-    m = re.search(f'^\\$Id: pota ({id}) ({date})Z ({user}) \\$$', svnId)
-    if m != None:
+    svnId = "$Id: pota 3687 2025-02-14 19:56:56Z uz $"
+    idPat = '\\d+'
+    datePat = '\\d{4}-\\d{2}-\\d{2} \\d{2}:\\d{2}:\\d{2}'
+    userPat = '\\w+'
+    m = re.search(f'^\\$Id: pota ({idPat}) ({datePat})Z ({userPat}) \\$$', svnId)
+    if m is not None:
         return {
             'version': m[1],
             'lastChange': m[2],
@@ -211,10 +225,10 @@ def filterList(data, func):
 def openSession():
     global session
 
-    if session == None:
+    if session is None:
         session = requests.Session()
         programInfo = getVersion()
-        version = "unknown" if programInfo == None else programInfo["version"]
+        version = "unknown" if programInfo is None else programInfo["version"]
         session.headers = {
             "accept": "application/json, text/plain, */*",
             "accept-encoding": "gzip, deflate",
@@ -228,7 +242,7 @@ def openSession():
 # Call an API returning the response text. Will abort on any errors. The
 # function allows to use a cache file.
 def callApi(url, cache, maxAge):
-    global config, fromCache, lastApiCall, rateLimit, readCache, session, writeCache
+    global fromCache, lastApiCall, rateLimit, readCache, session, writeCache
 
     # Try to read from the cache
     if readCache:
@@ -240,7 +254,7 @@ def callApi(url, cache, maxAge):
             if fromCache or res.st_mtime >= now - maxAge:
                 debug(f"Returning cached data for {url}")
                 return cachePath.read_text()
-        except:
+        except Exception:
             # No cache file or error accessing it. Read from the net or fail.
             if fromCache:
                 error(f'Document \"{cache}\" not availabke in cache')
@@ -248,12 +262,11 @@ def callApi(url, cache, maxAge):
                 debug(f"No cache file found for {url}")
 
     # File not found in cache. Rate limit API calls if requested.
-    if rateLimit != None:
-        if lastApiCall != None:
-            timeLeft = (lastApiCall + rateLimit) - time.time()
-            if timeLeft > 0:
-                debug(f'Rate limiting API call - sleeping {timeLeft:.3f} seconds')
-                time.sleep(timeLeft)
+    if rateLimit is not None and lastApiCall is not None:
+        timeLeft = (lastApiCall + rateLimit) - time.time()
+        if timeLeft > 0:
+            debug(f'Rate limiting API call - sleeping {timeLeft:.3f} seconds')
+            time.sleep(timeLeft)
 
     # Do the actual API call
     try:
@@ -266,7 +279,7 @@ def callApi(url, cache, maxAge):
     if response.status_code != 200:
         error('Cannot retrieve data')
     responseText = response.text
-    if rateLimit != None:
+    if rateLimit is not None:
         lastApiCall = time.time()
 
     # Write to the cache if one was given
@@ -290,14 +303,14 @@ def callJson(url, cache, maxAge):
     try:
         jsonData = json.loads(response)
     except Exception as e:
-        error(f"Error converting response from {url} into json")
+        error(f"Error converting response from {url} into json: {e}")
     return jsonData
 
 
 # Call an API, read the response as JSON and make sure its a list.
 def callJsonList(url, cache, maxAge):
     jsonData = callJson(url, cache, maxAge)
-    if type(jsonData) != list:
+    if not isinstance(jsonData, list):
         error(f"Unexpected response from {url}: Not an array")
     return jsonData
 
@@ -330,7 +343,7 @@ def readConfig():
     config = configparser.ConfigParser()
     try:
         config.read(configName())
-    except:
+    except Exception:
         pass
     # Fill in default values. We do this even if we could read the config since
     # newer version of the config may introduce new keys.
@@ -353,10 +366,10 @@ def writeConfig():
     try:
         # Make sure we create the config in mode 0600
         handle = os.open(
-                     path = configName(),
-                     flags = os.O_WRONLY | os.O_CREAT  | os.O_TRUNC,
-                     mode = 0o600
-                 )
+            path = configName(),
+            flags = os.O_WRONLY | os.O_CREAT  | os.O_TRUNC,
+            mode = 0o600
+        )
         with open(handle, 'w') as configFile:
             config.write(configFile)
     except Exception as e:
@@ -382,6 +395,30 @@ def getCallActivations(call):
     if not "activations" in profile["recent_activity"]:
         return []
     return profile["recent_activity"]["activations"]
+
+
+def getActivator(years):
+    cfg = cacheConfig['activator']
+    if len(years) == 0:
+        # No year given, return full list
+        url = f"https://api.pota.app/activator/all"
+        return callJsonList(url, cfg.genName(None), cfg.holdTime)
+    else:
+        # Multiple years - we must merge them
+        entriesByCall = { }
+        for year in years:
+            url = f"https://api.pota.app/activator/all?year={year}"
+            entriesFromYear = callJsonList(url, cfg.genName(year), cfg.holdTime)
+            for entry in entriesFromYear:
+                call = entry["activeCallsign"]
+                existing = entriesByCall.get(call);
+                if existing is None:
+                    entriesByCall[call] = entry;
+                else:
+                    for field in [ "activations", "units", "TotalContacts", "TotalCWContacts", "TotalDataContacts", "TotalPhoneContacts" ]:
+                        existing[field] = str(int(existing[field]) + int(entry[field]))
+        # Convert to list and return
+        return list(entriesByCall.values())
 
 
 def getAwards(call):
@@ -411,12 +448,7 @@ def getLocations():
 
 
 def getParks(regions):
-    if type(regions) != list:
-        # Argument is a single region
-        url = f"https://api.pota.app/location/parks/{regions}"
-        cfg = cacheConfig['parks']
-        return callJsonList(url, cfg.genName(regions), cfg.holdTime)
-    else:
+    if isinstance(regions, list):
         # Argument is a region list. Read the parks for all these regions.
         # Take care that parks that span multiple regions are just added once.
         parks = [ ]
@@ -428,6 +460,11 @@ def getParks(regions):
                     parks.append(park)
                     addedRefs[ref] = True
         return parks
+    else:
+        # Argument is a single region
+        url = f"https://api.pota.app/location/parks/{regions}"
+        cfg = cacheConfig['parks']
+        return callJsonList(url, cfg.genName(regions), cfg.holdTime)
 
 
 def getParkProfile(park):
@@ -444,11 +481,11 @@ def getCallProfile(call):
 
 def getRegions(country = None):
     countries = getCountries()
-    if country != None:
+    if country is not None:
         countries = filterList(countries, lambda e: e["prefix"] == country)
     regions = [ ]
-    for country in countries:
-        for entity in country["entities"]:
+    for c in countries:
+        for entity in c["entities"]:
             for region in entity["locations"]:
                 regions.append(region)
     return regions
@@ -475,37 +512,37 @@ def getSpots():
         if spot["mode"] == "":
             spot["mode"] = "SSB"
         freq = float(spot["frequency"])
-        if freq >= 135.7 and freq <= 135.8:
+        if 135.7 <= freq <= 135.8:
             spot["band"] = "2200M"
-        elif freq >= 472.0 and freq <= 479.0:
+        elif 472.0 <= freq <= 479.0:
             spot["band"] = "630M"
-        elif freq >= 1810.0 and freq <= 2000.0:
+        elif 1810.0 <= freq <= 2000.0:
             spot["band"] = "160M"
-        elif freq >= 3500.0 and freq <= 4000.0:
+        elif 3500.0 <= freq <= 4000.0:
             spot["band"] = "80M"
-        elif freq >= 7000.0 and freq <= 7300.0:
+        elif 7000.0 <= freq <= 7300.0:
             spot["band"] = "40M"
-        elif freq >= 10100.0 and freq <= 10150.0:
+        elif 10100.0 <= freq <= 10150.0:
             spot["band"] = "30M"
-        elif freq >= 14000.0 and freq <= 14350.0:
+        elif 1400.0 <= freq <= 14350.0:
             spot["band"] = "20M"
-        elif freq >= 18068.0 and freq <= 18168.0:
+        elif 1868.0 <= freq <= 18168.0:
             spot["band"] = "17M"
-        elif freq >= 21000.0 and freq <= 21450.0:
+        elif 2100.0 <= freq <= 21450.0:
             spot["band"] = "15M"
-        elif freq >= 24890.0 and freq <= 24990.0:
+        elif 24890.0 <= freq <= 24990.0:
             spot["band"] = "12M"
-        elif freq >= 28000.0 and freq <= 29700.0:
+        elif 2800.0 <= freq <= 29700.0:
             spot["band"] = "10M"
-        elif freq >= 50000.0 and freq <= 52000.0:
+        elif 50000.0 <= freq <= 52000.0:
             spot["band"] = "6M"
-        elif freq >= 70000.0 and freq <= 70500.0:
+        elif 70000.0 <= freq <= 70500.0:
             spot["band"] = "4M"
-        elif freq >= 144000.0 and freq <= 148000.0:
+        elif 144000.0 <= freq <= 148000.0:
             spot["band"] = "2M"
-        elif freq >= 430000.0 and freq <= 440000.0:
+        elif 430000.0 <= freq <= 440000.0:
             spot["band"] = "70CM"
-        elif freq >= 1240000.0 and freq <= 1300000.0:
+        elif 1240000.0 <= freq <= 1300000.0:
             spot["band"] = "23CM"
         else:
             spot["band"] = "unknown"
@@ -517,11 +554,6 @@ def getSpotComments(call, park):
     cfg = cacheConfig['spotComments']
     comments = callJsonList(url, cfg.genName(call, park), cfg.holdTime)
     return comments
-
-
-def postSpot(spotData):
-    url = "https://api.pota.app/spot/"
-    postJson(url, spotData)
 
 
 ###############################################################################
@@ -563,6 +595,67 @@ def outputParkActivations(activations):
         phone = act["qsosPHONE"]
         total = act["totalQSOs"]
         print(f'{date}: {call} (cw: {cw}, data: {data}, phone: {phone}, total: {total})')
+
+
+def outputActivators(activators):
+    global jsonOutput
+    if jsonOutput:
+        printJson(activators)
+        return
+
+    for entry in activators:
+        act = entry["activations"]
+        call = withColon(entry["activeCallsign"])
+        cw = int(entry["TotalCWContacts"])
+        data = int(entry["TotalDataContacts"])
+        phone = int(entry["TotalPhoneContacts"])
+        total = int(entry["TotalContacts"])
+        if total == 0:
+            error('total QSOs == 0 in activator data')
+        cwP = float(cw) / float(total)
+        dataP = float(data) / float(total)
+        phoneP = float(phone) / float(total)
+        print(
+            f'{call:<10} {act:>5} (' +
+            f'cw: {cw}[{cwP * 100.0:.1f}%], ' +
+            f'data: {data}[{dataP * 100.0:.1f}%], ' +
+            f'phone: {phone}[{phoneP * 100.0:.1f}%], ' +
+            f'total: {total})'
+        )
+
+
+def outputActivatorTotals(activators):
+    global jsonOutput
+    if jsonOutput:
+        # No output in this case
+        return
+
+    count = len(activators)
+    act = 0
+    qsos = 0
+    cw = 0
+    data = 0
+    phone = 0
+    for e in activators:
+        act += int(e["activations"])
+        qsos += int(e["TotalContacts"])
+        cw += int(e["TotalCWContacts"])
+        data += int(e["TotalDataContacts"])
+        phone += int(e["TotalPhoneContacts"])
+    if qsos > 0:
+        cwP = float(cw) / float(qsos)
+        dataP = float(data) / float(qsos)
+        phoneP = float(phone) / float(qsos)
+    else:
+        cwP = 0.0
+        dataP = 0.0
+        phoneP = 0.0
+    print(
+        f'{count} callsigns, {act} activations, {qsos} QSOs ' +
+        f'(cw: {cw}[{cwP * 100.0:.1f}%], ' +
+        f'data: {data}[{dataP * 100.0:.1f}%], ' +
+        f'phone: {phone}[{phoneP * 100.0:.1f}%])'
+    )
 
 
 def outputAwards(awards):
@@ -804,6 +897,136 @@ def readActivations(args):
         outputCallActivations(activations)
 
 
+def readActivators(args):
+    modeRegex = re.compile(
+        "(?P<negate>\\^)?" +
+        "(?P<mode>cw|data|phone)" +
+        "(?P<cmp>[<>][0-9]+(\\.[0-9]*)?%?)?",
+        re.IGNORECASE
+    )
+
+    # Parse the command arguments. We accept -u to include unsuccessful ones.
+    opts, tokens = getOpt(
+        args,
+        'ac:m:tTy:',
+        [
+            'activations',
+            'call=',
+            'mode=',
+            'total',
+            'TOTAL', 'year='
+        ]
+    )
+    act = False
+    callFilters = []
+    modeFilters = []
+    total = 0
+    years = []
+    for opt, arg in opts:
+        if opt in [ '-a', '--activations' ]:
+            act = True
+        elif opt in [ '-c', '--cilter' ]:
+            try:
+                expected = not arg.startswith("^")
+                if not expected:
+                    arg = arg[1:]
+                callFilter = re.compile(arg, re.IGNORECASE)
+                callFilters.append({ "expected" : expected, "regex" : callFilter})
+            except re.error:
+                error(f"Not a valid regular expression: \"{arg}\"")
+        elif opt in [ '-m', '--mode' ]:
+            filterDefs = []
+            for tok in arg.lower().split(","):
+                match = modeRegex.fullmatch(tok)
+                if match is None:
+                    error(f"Invalid mode {tok} in argument to {opt}")
+                negate = not match.group("negate") is None
+                mode = match.group("mode")
+                cmp = match.group("cmp")
+                less = None if cmp is None else cmp.startswith("<")
+                if not less is None:
+                    cmp = cmp[1:]
+                percent = False if cmp is None else cmp.endswith("%")
+                if percent:
+                    cmp = cmp[:-1]
+                filterDef = {
+                    "expected" : not negate,
+                    "mode" : mode,
+                    "less" : less,
+                    "cmp" : None if cmp is None else float(cmp),
+                    "percent" : percent
+                }
+                filterDefs.append(filterDef)
+            modeFilters.append(filterDefs)
+
+        elif opt in [ '-t', '--total' ]:
+            total = 1
+        elif opt in [ '-T', '--TOTAL' ]:
+            total = 2
+        elif opt in [ '-y', '--year' ]:
+            for year in arg.split(","):
+                try:
+                    year = int(year)
+                except ValueError:
+                    error(f"Not a valid year: {year}")
+                if year < 100:
+                    year += 2000
+                if year < 2000 or year > 2040:
+                    error(f"The given year {arg} is out of range")
+                years.append(year)
+
+    # No other arguments allowed
+    noArgs(tokens, "activators")
+
+    # Read all activators optionally for one year then apply any filters given
+    activators = getActivator(years);
+    for callFilter in callFilters:
+        expected = callFilter["expected"]
+        regex = callFilter["regex"]
+        activators = filterList(
+            activators,
+            lambda e: (regex.fullmatch(e["activeCallsign"]) is not None) == expected
+        )
+    for filterDefs in modeFilters:
+        filtered = [ ]
+        for filterDef in filterDefs:
+            mode = filterDef["mode"]
+            expected = filterDef["expected"]
+            compareVal = filterDef["cmp"]
+            less = filterDef["less"]
+            percent = filterDef["percent"]
+            if mode == "cw":
+                field = "TotalCWContacts"
+            elif mode == "data":
+                field = "TotalDataContacts"
+            elif mode == "phone":
+                field = "TotalPhoneContacts"
+            def filter(entry):
+                value = entry[field]
+                if compareVal is None:
+                    return (value > 0) == expected
+                if percent:
+                    value = value / float(entry["TotalContacts"]) * 100.0
+                if less:
+                    return (value < compareVal) == expected
+                else:
+                    return (value > compareVal) == expected
+            filtered += filterList(activators, filter)
+        activators = filtered
+        if len(activators) == 0:
+            break
+
+    # Sort the output then print it
+    if act:
+        activators.sort(key = lambda e : int(e["activations"]), reverse = True)
+    else:
+        activators.sort(key = lambda e : e["activeCallsign"])
+    if total != 2:
+        outputActivators(activators)
+    if total > 0:
+        outputActivatorTotals(activators)
+
+
 def readAwards(args):
     # Call is mandatory argument
     requireArg(args, "awards")
@@ -832,8 +1055,8 @@ def cleanupCache(args):
                 print(f"Non file entry in cache directory: {entry}", file = sys.stderr)
                 continue
             m = re.search('^[a-z]+', entry.name, re.IGNORECASE)
-            key = None if m == None else cleanupConfig.get(m[0])
-            if key == None:
+            key = None if m is None else cleanupConfig.get(m[0])
+            if key is None:
                 errors = True
                 print(f"Unknown file in cache directory: {entry}", file = sys.stderr)
                 continue
@@ -853,7 +1076,7 @@ def cleanupCache(args):
         error(f"Error in cleanup: {e}")
     # Return a non zero exit code if something was suspicious
     if errors:
-        exit(1)
+        sys.exit(1)
 
 
 def editConfig(args):
@@ -878,7 +1101,7 @@ def editConfig(args):
             error(f'Invalid config variable name: {arg}')
         if not config.has_option(section, key):
             error(f'Invalid config variable name: {arg}')
-        if value == None:
+        if value is None:
             print(f'{arg}={config.get(section, key)}')
         else:
             config.set(section, key, value)
@@ -922,6 +1145,48 @@ activations [options] <call|park>
   Print activations for a park or call. For a park, all activations are shown,
   for a call only up to 25 recent ones. Command options:
     -u, --unsuccessful          Include unsuccessful activations
+
+activators [options]
+  Print a list of all activators, the number of activations and the number of
+  contacts.
+    -a, --activations           Sort by number of activations instead of call
+    -c <regex>, --call <regex>  Extract calls that match the given regex
+    -m <modes>, --mode <modes>  Filter by modes (see below)
+    -t, --totals                Add a line with totals
+    -T, --TOTALS                Print just one line with totals
+    -y <years>, --year <years>  Limit data to the given year (or years)
+  The regular expression given to '-c' is a real regex that must match the
+  full call sign. It behaves as if it were enclosed in '^...$'. This allows
+  to prefix a call filter regex with '^' which negates it. Multiple call
+  filters may be used which are 'and' combined. So
+    pota activators -a -y 2025 -c 'd[a-r].*' -c '^df5.*'
+  prints the list of activators in 2025 with german call signs but excludes
+  the ones starting with 'DF5'.
+  Entries can be filtered by modes and number of QSOs in this mode. Valid modes
+  are 'cw', 'data' or 'phone'. A mode string may just contain a mode name or
+  include a comparison operator and a number appended. If there is an
+  additional percent sign, the percentage of QSOs in this mode is compared. If
+  just a mode is given, a QSO count > 0 is tested. So '-m cw>100' filters all
+  activators with more than 100 cw QSOs. '-m cw>50%' applies to all activators
+  with more than 50% of their total QSOs in cw. As usual, a match can be
+  inverted by prefixing the filter with '^'. More than one mode filter can be
+  specified by separating the expressions using commas. In this case the
+  filters are 'or' combined. Filters in separate '-m' arguments are 'and'
+  combined.
+  The '-y' option accepts a single year or a comma separated list of years.
+  Example that outputs data from 2024 and 2025 for all call signs starting
+  with 'DF5':
+    pota activators -y 24,2025 -c 'df5.*'
+  Output activators with german call signs from 2025 that have cw qsos:
+    pota activators -y 2025 -c 'd[a-r].*' -m cw
+  Same as above but with cw only:
+    pota activators -y 2025 -c 'd[a-r].*' -m cw -m ^data -m ^phone
+  Another way to say the same:
+    pota activators -y 2025 -c 'd[a-r].*' -m '^cw<100%'
+  Ranking (most activations first) for 2024 excluding data operators:
+    pota activators -a -y 2024 -m ^data
+  Output all activators that do mostly cw:
+    pota activators -a -m 'cw>90%'
 
 awards <call>
   Show the awards for a call.
@@ -1054,7 +1319,7 @@ def readMayor(args):
 
     # From the argument, get a park list and a filter function.
     parks = [ ]
-    filter = lambda call: True
+    filterFunc = lambda call: True
     if isPark(arg):
         parks.append({ "reference": arg })
     elif isRegion(arg):
@@ -1078,7 +1343,7 @@ def readMayor(args):
                 addedParks[park] = True
         # Setup a filter function since we need only those parks in which the
         # call is mayor/deputy
-        filter = lambda call: call == arg
+        filterFunc = lambda call: call == arg
 
     # Get mayor/deputy status for all parks in the list.
     result = [ ]
@@ -1090,7 +1355,7 @@ def readMayor(args):
         validEntry = False
         if len(activations) >= 1:
             call = activations[0]["callsign"]
-            if filter(call):
+            if filterFunc(call):
                 park["mayor"] = {
                     "callsign": call,
                     "count": activations[0]["count"],
@@ -1099,7 +1364,7 @@ def readMayor(args):
                 validEntry = True
         if deputy and len(activations) >= 2:
             call = activations[1]["callsign"]
-            if filter(call):
+            if filterFunc(call):
                 park["deputy"] = {
                     "callsign": call,
                     "count": activations[1]["count"],
@@ -1132,13 +1397,13 @@ def readParks(args):
     firstAct = False
     for opt, arg in opts:
         if opt in [ '-a', '--activations' ]:
-            if sortKey != None:
+            if sortKey is not None:
                 error("Cannot specify multiple sort options")
             sortKey = "activations"
         elif opt in [ '-f', '--first' ]:
             firstAct = True
         elif opt in [ '-q', '--qsos' ]:
-            if sortKey != None:
+            if sortKey is not None:
                 error("Cannot specify multiple sort options")
             sortKey = "qsos"
 
@@ -1163,7 +1428,7 @@ def readParks(args):
 
     # Apply rate limiting if not overriden from the command line and if the
     # number of regions exceeds a threshold.
-    if rateLimit == None and (firstAct or len(regions) > 5):
+    if rateLimit is None and (firstAct or len(regions) > 5):
         rateLimit = defaultRateLimit
 
     # Read the parks for all regions.
@@ -1181,9 +1446,9 @@ def readParks(args):
                 park["firstActivator"] = ""
 
     # Sort the parks as required. Default sort key is reference.
-    if sortKey == None:
+    if sortKey is None:
         sortKey = "reference"
-    parks = sorted(parks, key = lambda p: p[sortKey])
+    parks.sort(key = lambda p: p[sortKey])
 
     # Finally output the parks
     outputParks(parks)
@@ -1202,7 +1467,8 @@ def readRegions(args):
         error("Too many arguments for \"regions\"")
 
     # Output them sorted by descriptor
-    outputRegions(sorted(regions, key = lambda r: r["descriptor"]))
+    regions.sort(key = lambda r: r["descriptor"])
+    outputRegions(regions)
 
 
 def postSpot(args):
@@ -1225,7 +1491,7 @@ def postSpot(args):
     park = ""
     for opt, arg in opts:
         if opt in [ '-c', '--comment' ]:
-                comment = arg
+            comment = arg
     for tok in tokens:
         if isFreq(tok):
             if freq != "":
@@ -1269,7 +1535,7 @@ def postSpot(args):
         'source': 'pota tool',
         'comments': comment
     }
-    postSpot(spotData)
+    postJson("https://api.pota.app/spot/", spotData)
 
 
 def readSpots(args):
@@ -1336,7 +1602,7 @@ def readSpots(args):
     # is no request for full comments, unify the data by placing spotter data
     # into a dict similar as with full comments.
     if addSpotters != 0:
-        if rateLimit == None and len(spots) > 20:
+        if rateLimit is None and len(spots) > 20:
             rateLimit = defaultRateLimit
         for spot in spots:
             comments = getSpotComments(spot["activator"], spot["reference"])
@@ -1355,8 +1621,8 @@ def readSpots(args):
             } ]
 
     # Sort the spots by frequency then output them
-    sortedSpots = sorted(spots, key = lambda spot : float(spot["frequency"]))
-    outputSpots(sortedSpots)
+    spots.sort(key = lambda spot : float(spot["frequency"]))
+    outputSpots(spots)
 
 
 def readStats(args):
@@ -1372,7 +1638,7 @@ def readStats(args):
 def printVersion(args):
     noArgs(args, "version")
     info = getVersion()
-    if info == None:
+    if info is None:
         print("unknown")
     else:
         print(f'Version {info["version"]}, last changed on {info["lastChange"]} by {info["author"]}')
@@ -1387,109 +1653,119 @@ def main():
     global cacheDir, fromCache, debugOutput, jsonOutput, rateLimit
     global readCache, writeCache
 
-    # Read the options file
-    config = readConfig()
+    try:
+        # Read the options file
+        readConfig()
 
-    # Parse command line options
-    opts, args = getOpt(
-                     sys.argv[1:],
-                     'c:dfjl:rw',
-                     [
-                         'cachedir=',
-                         'debug',
-                         'fromcache',
-                         'json',
-                         'nocacheread',
-                         'nocachewrite',
-                         'ratelimit='
-                     ]
-                 )
+        # Parse command line options
+        opts, args = getOpt(
+            sys.argv[1:],
+            'c:dfjl:rw',
+            [
+                'cachedir=',
+                'debug',
+                'fromcache',
+                'json',
+                'nocacheread',
+                'nocachewrite',
+                'ratelimit='
+            ]
+        )
 
-    # Handle options
-    for opt, arg in opts:
-        if opt in [ '-c', '--cachedir' ]:
-            cacheDir = Path(arg)
-        elif opt in [ '-d', '--debug' ]:
-            debugOutput = True
-        elif opt in [ '-f', '--fromcache' ]:
-            fromCache = True
-        elif opt in [ '-j', '--json' ]:
-            jsonOutput = True
-        elif opt in [ '-l', '--ratelimit' ]:
+        # Handle options
+        for opt, arg in opts:
+            if opt in [ '-c', '--cachedir' ]:
+                cacheDir = Path(arg)
+            elif opt in [ '-d', '--debug' ]:
+                debugOutput = True
+            elif opt in [ '-f', '--fromcache' ]:
+                fromCache = True
+            elif opt in [ '-j', '--json' ]:
+                jsonOutput = True
+            elif opt in [ '-l', '--ratelimit' ]:
+                try:
+                    rateLimit = float(arg)
+                except ValueError:
+                    error(f'Argument to {opt} must be a floating point value')
+                if rateLimit < 0.0:
+                    error(f'Argument to {opt} must not be negative')
+            elif opt in [ '-r', '--nocacheread' ]:
+                readCache = False
+            elif opt in [ '-w', '--nocachewrite' ]:
+                writeCache = False
+
+        if not readCache:
+            if fromCache:
+                error("Options -r and -f cannot be used together")
+            debug("Reading from cache is disabled via command line")
+        if not writeCache:
+            if fromCache:
+                error("Options -w and -f cannot be used together")
+            debug("Writing to cache is disabled via command line")
+
+        # Setup/create the cache directory
+        if cacheDir is None:
+            cacheDir = Path.home() / ".local" / "share" / "pota"
+        if writeCache and not cacheDir.exists():
+            debug(f"Creating cache directory {cacheDir}")
             try:
-                rateLimit = float(arg)
-            except ValueError:
-                error(f'Argument to {opt} must be a floating point value')
-            if rateLimit < 0.0:
-                error(f'Argument to {opt} must not be negative')
-        elif opt in [ '-r', '--nocacheread' ]:
-            readCache = False
-        elif opt in [ '-w', '--nocachewrite' ]:
-            writeCache = False
+                cacheDir.mkdir(mode = 0o700, parents = True, exist_ok = True)
+            except Exception as e:
+                error(f"Error creating {cacheDir}: {e}")
+        debug(f"Cache directory is {cacheDir}")
 
-    if not readCache:
-        if fromCache:
-            error("Options -r and -f cannot be used together")
-        debug("Reading from cache is disabled via command line")
-    if not writeCache:
-        if fromCache:
-            error("Options -w and -f cannot be used together")
-        debug("Writing to cache is disabled via command line")
+        # Handle commands
+        if len(args) == 0:
+            error("No command given - use \"pota help\" for help")
+        cmd = args[0]
+        if cmd == "activations":
+            readActivations(args[1:])
+        elif cmd == "activators":
+            readActivators(args[1:])
+        elif cmd == "awards":
+            readAwards(args[1:])
+        elif cmd == "cleanup":
+            cleanupCache(args[1:])
+        elif cmd == "config":
+            editConfig(args[1:])
+        elif cmd == "countries":
+            readCountries(args[1:])
+        elif cmd == "help":
+            printHelp(args[1:])
+        elif cmd == "leaderboard":
+            readLeaderboard(args[1:])
+        elif cmd == "locations":
+            readLocations(args[1:])
+        elif cmd == "mayor":
+            readMayor(args[1:])
+        elif cmd == "parks":
+            readParks(args[1:])
+        elif cmd == "profile":
+            readProfile(args[1:])
+        elif cmd == "regions":
+            readRegions(args[1:])
+        elif cmd == "spot":
+            postSpot(args[1:])
+        elif cmd == "spots":
+            readSpots(args[1:])
+        elif cmd == "stats":
+            readStats(args[1:])
+        elif cmd == "version":
+            printVersion(args[1:])
+        else:
+            error(f"Unknown command \"{cmd}\"")
 
-    # Setup/create the cache directory
-    if cacheDir == None:
-        cacheDir = Path.home() / ".local" / "share" / "pota"
-    if writeCache and not cacheDir.exists():
-        debug(f"Creating cache directory {cacheDir}")
-        try:
-            cacheDir.mkdir(mode = 0o700, parents = True, exist_ok = True)
-        except e as Exception:
-            error(f"Error creating {cacheDir}: {e}")
-    debug(f"Cache directory is {cacheDir}")
+        # Done
+        sys.exit(0)
 
-    # Handle commands
-    if len(args) == 0:
-        error("No command given - use \"pota help\" for help")
-    cmd = args[0]
-    if cmd == "activations":
-        readActivations(args[1:])
-    elif cmd == "awards":
-        readAwards(args[1:])
-    elif cmd == "cleanup":
-        cleanupCache(args[1:])
-    elif cmd == "config":
-        editConfig(args[1:])
-    elif cmd == "countries":
-        readCountries(args[1:])
-    elif cmd == "help":
-        printHelp(args[1:])
-    elif cmd == "leaderboard":
-        readLeaderboard(args[1:])
-    elif cmd == "locations":
-        readLocations(args[1:])
-    elif cmd == "mayor":
-        readMayor(args[1:])
-    elif cmd == "parks":
-        readParks(args[1:])
-    elif cmd == "profile":
-        readProfile(args[1:])
-    elif cmd == "regions":
-        readRegions(args[1:])
-    elif cmd == "spot":
-        postSpot(args[1:])
-    elif cmd == "spots":
-        readSpots(args[1:])
-    elif cmd == "stats":
-        readStats(args[1:])
-    elif cmd == "version":
-        printVersion(args[1:])
-    else:
-        error(f"Unknown command \"{cmd}\"")
-
-    # Done
-    exit(0)
-
+    except BrokenPipeError:
+        # Python flushes standard streams on exit; redirect remaining output
+        # to devnull to avoid another BrokenPipeError at shutdown
+        devnull = os.open(os.devnull, os.O_WRONLY)
+        os.dup2(devnull, sys.stdout.fileno())
+        if debugOutput:
+            sys.stderr.write("SIGPIPE received, terminating.\n")
+        sys.exit(1)
 
 if __name__ == "__main__":
     main()
-
