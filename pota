@@ -157,7 +157,7 @@ def isMode(token):
 
 # Check if the given token is a park id
 def isPark(token):
-    return re.search("^([A-Z]{2}-[0-9]{4}|K-TEST)$", token, flags = re.I) is not None
+    return re.search("^([A-Z]{2}-[0-9]{4,5}|K-TEST)$", token, flags = re.I) is not None
 
 
 # Check if the given token denotes a region
