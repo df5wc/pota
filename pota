@@ -5,6 +5,7 @@
 # Imports
 import configparser
 import datetime
+import functools
 import getopt
 import json
 import os
@@ -175,6 +176,11 @@ def isFreq(token):
     return re.search("^[0-9]+(\\.[0-9]*)?$", token) is not None
 
 
+# Check if a given token is a floating point value
+def isFloat(token):
+    return re.match(r'^[+-]?(\d+(\.\d*)?|\.\d+)([eE][+-]?\d+)?$', token) is not None
+
+
 # Check if s string is a valid regex
 def isValidRegEx(regex):
     try:
@@ -186,7 +192,7 @@ def isValidRegEx(regex):
 
 # Return program information from SVN in a dict
 def getVersion():
-    svnId = "$Id: pota 3687 2025-02-14 19:56:56Z uz $"
+    svnId = "$Id: pota 3692 2025-03-06 16:30:32Z uz $"
     idPat = '\\d+'
     datePat = '\\d{4}-\\d{2}-\\d{2} \\d{2}:\\d{2}:\\d{2}'
     userPat = '\\w+'
@@ -511,7 +517,10 @@ def getSpots():
     for spot in spots:
         if spot["mode"] == "":
             spot["mode"] = "SSB"
-        freq = float(spot["frequency"])
+        try:
+            freq = float(spot["frequency"])
+        except ValueError:
+            freq = 0.0
         if 135.7 <= freq <= 135.8:
             spot["band"] = "2200M"
         elif 472.0 <= freq <= 479.0:
@@ -873,7 +882,7 @@ def outputSpots(spots):
 ###############################################################################
 
 
-def readActivations(args):
+def cmdActivations(args):
     # Parse the command arguments. We accept -u to include unsuccessful ones.
     opts, tokens = getOpt(args, 'u', [ 'unsuccessful' ])
     unsuccessful = False
@@ -897,7 +906,7 @@ def readActivations(args):
         outputCallActivations(activations)
 
 
-def readActivators(args):
+def cmdActivators(args):
     modeRegex = re.compile(
         "(?P<negate>\\^)?" +
         "(?P<mode>cw|data|phone)" +
@@ -1018,7 +1027,16 @@ def readActivators(args):
 
     # Sort the output then print it
     if act:
-        activators.sort(key = lambda e : int(e["activations"]), reverse = True)
+        def compare(lhs, rhs):
+            left = lhs.get("activations", "0")
+            right = rhs.get("activations", "0")
+            diff = int(right) - int(left)
+            if diff == 0:
+                left = lhs.get("TotalContacts", "0")
+                right = rhs.get("TotalContacts", "0")
+                diff = int(right) - int(left)
+            return diff
+        activators.sort(key = functools.cmp_to_key(compare))
     else:
         activators.sort(key = lambda e : e["activeCallsign"])
     if total != 2:
@@ -1027,7 +1045,7 @@ def readActivators(args):
         outputActivatorTotals(activators)
 
 
-def readAwards(args):
+def cmdAwards(args):
     # Call is mandatory argument
     requireArg(args, "awards")
     call = args[0].upper()
@@ -1035,7 +1053,7 @@ def readAwards(args):
     outputAwards(getAwards(call))
 
 
-def cleanupCache(args):
+def cmdCleanup(args):
     global cleanupConfig
 
     # We cannot cleanup if we aren't allowed to write the cache
@@ -1079,7 +1097,7 @@ def cleanupCache(args):
         sys.exit(1)
 
 
-def editConfig(args):
+def cmdConfig(args):
     global config
 
     # The arguments may be either "section.key" for a config variable which is
@@ -1109,7 +1127,7 @@ def editConfig(args):
     writeConfig()
 
 
-def readCountries(args):
+def cmdCountries(args):
     noArgs(args, "programs")
     countries = getCountries()
     # Replace the entities by their count
@@ -1118,168 +1136,74 @@ def readCountries(args):
     outputCountries(countries)
 
 
-def printHelp(args):
-    noArgs(args, "help")
-    print(
-"""Usage: pota [global options] cmd [cmd options] [arguments]
+def cmdHelp(args):
+    global commands
 
-Please note that order is important on the command line!
+    # Parse the command arguments. We accept -v for verbose help that includes
+    # command details.
+    verbose = False
+    opts, tokens = getOpt(args, 'v', [ 'verbose' ])
+    for opt, arg in opts:
+        if opt in [ '-v', '--verbose' ]:
+            verbose = True
 
-Available global options are:
-  -c <dir>, --cachedir <dir>    Use this directory for cache files
-  -f, --fromcache               Work only with the cache, no downloads
-  -d, --debug                   Enable debug output
-  -j, --json                    Output json data instead of text
-  -l <sec>, --ratelimit <sec>   Rate limit API calls
-  -n, --nocache                 Do not read or write cached data
-  -r, --nocacheread             Do not read from the cache
-  -w, --nowritecache            Do not write to the cache
+    if len(tokens) == 0:
+        print(
+            "Usage: pota [global options] cmd [cmd options] [arguments]\n"
+            "\n"
+            "Please note that order is important on the command line!\n"
+            "\n"
+            "Available global options are:\n"
+            "  -c <dir>, --cachedir <dir>    Use this directory for cache files\n"
+            "  -f, --fromcache               Work only with the cache, no downloads\n"
+            "  -d, --debug                   Enable debug output\n"
+            "  -j, --json                    Output json data instead of text\n"
+            "  -l <sec>, --ratelimit <sec>   Rate limit API calls\n"
+            "  -n, --nocache                 Do not read or write cached data\n"
+            "  -r, --nocacheread             Do not read from the cache\n"
+            "  -w, --nowritecache            Do not write to the cache\n"
+            "\n"
+            "Options -r/-w and -f cannot be used together. If -f is given, the cached data\n"
+            "is used regardless of its age. Commands with lots of API calls will\n"
+            "automatically enable rate limiting if not disabled on the command line.\n"
+            "\n"
+            "Available commands are:\n"
+        )
+        for cmd, data in commands.items():
+            print(f"  {data.synopsis}")
+            if verbose:
+                for line in data.description.split('\n'):
+                    print(f"  {line}")
+        print(
+            "\n"
+            "Use\n"
+            "  pota help <command>\n"
+            "to get detailed help for a specific command or use\n"
+            "  pota help -v\n"
+            "to get detailed help for all commands (beware, large!).\n"
+            "\n"
+            "Options marked with (*) will cause additional API calls and will automatically\n"
+            "apply rate limiting which increases command execution times. It is possible to\n"
+            "override rate limiting by adding '-l 0' to the command line but please note\n"
+            "that this stresses the POTA servers and is rather unfriendly.\n"
+        )
 
-Options -r/-w and -f cannot be used together. If -f is given, the cached data
-is used regardless of its age. Commands with lots of API calls will
-automatically enable rate limiting if not disabled on the command line.
+    elif len(args) == 1:
+        if verbose:
+            error("-v is not applicable in specific help")
+        cmd = args[0]
+        data = commands.get(cmd, None)
+        if data is None:
+            error(f'Not a known pota command: {cmd}')
+        print(data.synopsis)
+        for line in data.description.split('\n'):
+            print(f"  {line}")
 
-Available commands and their arguments are:
-
-activations [options] <call|park>
-  Print activations for a park or call. For a park, all activations are shown,
-  for a call only up to 25 recent ones. Command options:
-    -u, --unsuccessful          Include unsuccessful activations
-
-activators [options]
-  Print a list of all activators, the number of activations and the number of
-  contacts.
-    -a, --activations           Sort by number of activations instead of call
-    -c <regex>, --call <regex>  Extract calls that match the given regex
-    -m <modes>, --mode <modes>  Filter by modes (see below)
-    -t, --totals                Add a line with totals
-    -T, --TOTALS                Print just one line with totals
-    -y <years>, --year <years>  Limit data to the given year (or years)
-  The regular expression given to '-c' is a real regex that must match the
-  full call sign. It behaves as if it were enclosed in '^...$'. This allows
-  to prefix a call filter regex with '^' which negates it. Multiple call
-  filters may be used which are 'and' combined. So
-    pota activators -a -y 2025 -c 'd[a-r].*' -c '^df5.*'
-  prints the list of activators in 2025 with german call signs but excludes
-  the ones starting with 'DF5'.
-  Entries can be filtered by modes and number of QSOs in this mode. Valid modes
-  are 'cw', 'data' or 'phone'. A mode string may just contain a mode name or
-  include a comparison operator and a number appended. If there is an
-  additional percent sign, the percentage of QSOs in this mode is compared. If
-  just a mode is given, a QSO count > 0 is tested. So '-m cw>100' filters all
-  activators with more than 100 cw QSOs. '-m cw>50%' applies to all activators
-  with more than 50% of their total QSOs in cw. As usual, a match can be
-  inverted by prefixing the filter with '^'. More than one mode filter can be
-  specified by separating the expressions using commas. In this case the
-  filters are 'or' combined. Filters in separate '-m' arguments are 'and'
-  combined.
-  The '-y' option accepts a single year or a comma separated list of years.
-  Example that outputs data from 2024 and 2025 for all call signs starting
-  with 'DF5':
-    pota activators -y 24,2025 -c 'df5.*'
-  Output activators with german call signs from 2025 that have cw qsos:
-    pota activators -y 2025 -c 'd[a-r].*' -m cw
-  Same as above but with cw only:
-    pota activators -y 2025 -c 'd[a-r].*' -m cw -m ^data -m ^phone
-  Another way to say the same:
-    pota activators -y 2025 -c 'd[a-r].*' -m '^cw<100%'
-  Ranking (most activations first) for 2024 excluding data operators:
-    pota activators -a -y 2024 -m ^data
-  Output all activators that do mostly cw:
-    pota activators -a -m 'cw>90%'
-
-awards <call>
-  Show the awards for a call.
-
-cleanup
-  Cleanup the cache. Remove all outdated data.
-
-config name[=value]
-  Query or set configuration variables.
-  Currently supported:
-    general.callsign    The callsign of the user. Used when spotting.
-
-  The configuration is stored in a file named '.pota' in the users home
-  directory.
-
-countries
-  Print all countries.
-
-leaderboard <park>
-  Print the leader board for a park.
-
-mayor <call|park|region(*)|country(*)>
-  Print the mayor for a park, all parks in a region or country or print all
-  parks where a user is the mayor (*).
-  For a call, only the parks from the last 25 activations are considered.
-  Command options:
-    -q, --qsos                  Use QSO count instead of activations
-
-parks [country|region]
-  Print parks sorted by park reference. Output may be limited to a single
-  country or a region. Command options:
-    -a, --activations           Sort by number of activations
-    -f, --first                 Add first activation info (*)
-    -q, --qsos                  Sort by number of qsos
-
-profile <call|park>
-  Print the profile for a call or park.
-
-regions [country]
-  Print regions. Output may be limited to a single country.
-
-spot [options] call@park freq [mode]
-  Post a spot. Command options:
-    -c text, --comment text     Post using this text as comment.
-  The call@park, freq and mode arguments can be specified in any order. They
-  are detected from their syntax. If no mode is given, SSB is assumed. The
-  frequency must be specified in kilohertz and may include trailing digits.
-
-  The spotters callsign is taken from the configuration. See the config
-  command on how to set it.
-
-  Example:
-    pota spot df5wc@de-0008 14032.1 cw -c \"thanks, 73!\"
+    else:
+        error(f'Too many arguments to "help": {" ".join(args)}')
 
 
-spots [options]
-  Print currently active spots. Command options:
-    -f f, --filter f            Add a filter for the displayed spots.
-    -q, --qrt                   Include spots marked as qrt.
-    -r, --rbn                   Print all spotters including RBN (*)
-    -s, --spotters              Print all spotters w/o RBN (*)
-  Filter tokens can be bands, calls, modes, parks, regions or countries. All
-  filter tokens are compared in full, so you cannot use 'DE-00' to include
-  just a subset of parks (those starting with 'DE-00').
-  Multiple tokens can be added to one filter separated by commas. In this case
-  they are \"or\" combined. Multiple filters specified with -f are \"and\"
-  combined. So
-    pota spots -f 20m,cw
-  prints all spots for 20m and all spots using mode CW, while
-    pota spots -f 20m -f cw
-  prints all spots for 20m that are using mode CW.
-  Filter tokens may be negated using '^' as prefix. So
-    pota spots -f ^ft8
-  shows all spots except those using FT8. Please note that using negations
-  with token lists is almost useless.
-    pota spots -f ^ft4,ft8
-  will show all spots that aren't FT4 *OR* FT8 which actually means that all
-  spots will be shown.
-
-stats <call|park>
-  Print statistics for a call or park.
-
-version
-  Print the software version.
-
-Options marked with (*) will cause additional API calls and will automatically
-apply rate limiting which increases command execution times. It is possible to
-override rate limiting by adding '-l 0' to the command line but please note
-that this stresses the POTA servers and is rather unfriendly.
-""")
-
-
-def readLeaderboard(args):
+def cmdLeaderboard(args):
     # Park id is mandatory argument
     requireArg(args, "leaderboard")
     arg = args[0].upper()
@@ -1289,7 +1213,7 @@ def readLeaderboard(args):
     outputLeaderboard(getLeaderboard(arg))
 
 
-def readLocations(args):
+def cmdLocations(args):
     # No arguments
     noArgs(args, "locations")
 
@@ -1297,7 +1221,7 @@ def readLocations(args):
     outputLocations(locations)
 
 
-def readMayor(args):
+def cmdMayor(args):
     global rateLimit, defaultRateLimit
 
     # Parse the command arguments. We accept
@@ -1377,7 +1301,7 @@ def readMayor(args):
     outputMayor(result)
 
 
-def readProfile(args):
+def cmdProfile(args):
     # Call or park is mandatory argument
     requireArg(args, "profile")
     arg = args[0].upper()
@@ -1387,25 +1311,53 @@ def readProfile(args):
         outputCallProfile(getCallProfile(arg))
 
 
-def readParks(args):
+def cmdParks(args):
     global defaultRateLimit, rateLimit
+
+    # Define a few comparison functions
+    def cmpRef(lhs, rhs):
+        left = lhs.get("reference", "")
+        right = rhs.get("reference", "")
+        if not isPark(left):
+            return -1
+        if not isPark(right):
+            return 1
+        return int(left[3:]) - int(right[3:])
+
+    def cmpAct(lhs, rhs):
+        left = lhs.get("activations", "0")
+        if left is None:
+            left = "0"
+        right = rhs.get("activations", "0")
+        if right is None:
+            right = "0"
+        return int(left) - int(right)
+
+    def cmpQsos(lhs, rhs):
+        left = lhs.get("qsos", "0")
+        if left is None:
+            left = "0"
+        right = rhs.get("qsos", "0")
+        if right is None:
+            right = "0"
+        return int(left) - int(right)
 
     # Parse the command arguments. We accept -a to sort by activations, -q to
     # sort by number of QSOs.
     opts, tokens = getOpt(args, 'afq', [ 'activations', 'first', 'qsos' ])
-    sortKey = None
+    compare = None
     firstAct = False
     for opt, arg in opts:
         if opt in [ '-a', '--activations' ]:
-            if sortKey is not None:
+            if compare is not None:
                 error("Cannot specify multiple sort options")
-            sortKey = "activations"
+            compare = cmpAct
         elif opt in [ '-f', '--first' ]:
             firstAct = True
         elif opt in [ '-q', '--qsos' ]:
-            if sortKey is not None:
+            if compare is not None:
                 error("Cannot specify multiple sort options")
-            sortKey = "qsos"
+            compare = cmpQsos
 
     # There may be a country or region argument.
     regions = [ ]
@@ -1446,15 +1398,15 @@ def readParks(args):
                 park["firstActivator"] = ""
 
     # Sort the parks as required. Default sort key is reference.
-    if sortKey is None:
-        sortKey = "reference"
-    parks.sort(key = lambda p: p[sortKey])
+    if compare is None:
+        compare = cmpRef
+    parks.sort(key = functools.cmp_to_key(compare))
 
     # Finally output the parks
     outputParks(parks)
 
 
-def readRegions(args):
+def cmdRegions(args):
     # May be followed by a country.
     if len(args) == 0:
         regions = getRegions()
@@ -1471,7 +1423,7 @@ def readRegions(args):
     outputRegions(regions)
 
 
-def postSpot(args):
+def cmdSpot(args):
     global config
 
     # We will always use the callsign of the spotter from the config.
@@ -1538,7 +1490,7 @@ def postSpot(args):
     postJson("https://api.pota.app/spot/", spotData)
 
 
-def readSpots(args):
+def cmdSpots(args):
     global defaultRateLimit, rateLimit
 
     # Parse the command arguments. We accept -q to include spots marked as qrt
@@ -1621,11 +1573,16 @@ def readSpots(args):
             } ]
 
     # Sort the spots by frequency then output them
-    spots.sort(key = lambda spot : float(spot["frequency"]))
+    def compare(spot):
+        if isFloat(spot["frequency"]):
+            return float(spot["frequency"])
+        else:
+            return 0.0
+    spots.sort(key = compare)
     outputSpots(spots)
 
 
-def readStats(args):
+def cmdStats(args):
     # Call or park id is mandatory argument
     requireArg(args, "stats")
     arg = args[0].upper()
@@ -1635,13 +1592,223 @@ def readStats(args):
         outputCallStats(getCallStats(arg))
 
 
-def printVersion(args):
+def cmdVersion(args):
     noArgs(args, "version")
     info = getVersion()
     if info is None:
         print("unknown")
     else:
         print(f'Version {info["version"]}, last changed on {info["lastChange"]} by {info["author"]}')
+
+
+# Define all commands with their handler function and help text
+@dataclass
+class CommandDef:
+    handler:        Callable[[list[str]], None]
+    synopsis:       str
+    description:    str
+
+commands = {
+    "activations" :
+        CommandDef(
+            cmdActivations,
+            "pota activations [options] <call|park>",
+            "Print activations for a park or call. For a park, all activations are shown,\n"
+            "for a call only up to 25 recent ones. Command options:\n"
+            "  -u, --unsuccessful          Include unsuccessful activations\n"
+        ),
+
+    "activators":
+        CommandDef(
+            cmdActivators,
+            "pota activators [options]",
+            "Print a list of all activators, the number of activations and the number of\n"
+            "contacts.\n"
+            "  -a, --activations           Sort by number of activations instead of call\n"
+            "  -c <regex>, --call <regex>  Extract calls that match the given regex\n"
+            "  -m <modes>, --mode <modes>  Filter by modes (see below)\n"
+            "  -t, --totals                Add a line with totals\n"
+            "  -T, --TOTALS                Print just one line with totals\n"
+            "  -y <years>, --year <years>  Limit data to the given year (or years)\n"
+            "The regular expression given to '-c' is a real regex that must match the\n"
+            "full call sign. It behaves as if it were enclosed in '^...$'. This allows\n"
+            "to prefix a call filter regex with '^' which negates it. Multiple call\n"
+            "filters may be used which are 'and' combined. So\n"
+            "  pota activators -a -y 2025 -c 'd[a-r].*' -c '^df5.*'\n"
+            "prints the list of activators in 2025 with german call signs but excludes\n"
+            "the ones starting with 'DF5'.\n"
+            "Entries can be filtered by modes and number of QSOs in this mode. Valid modes\n"
+            "are 'cw', 'data' or 'phone'. A mode string may just contain a mode name or\n"
+            "include a comparison operator and a number appended. If there is an\n"
+            "additional percent sign, the percentage of QSOs in this mode is compared. If\n"
+            "just a mode is given, a QSO count > 0 is tested. So '-m cw>100' filters all\n"
+            "activators with more than 100 cw QSOs. '-m cw>50%' applies to all activators\n"
+            "with more than 50% of their total QSOs in cw. As usual, a match can be\n"
+            "inverted by prefixing the filter with '^'. More than one mode filter can be\n"
+            "specified by separating the expressions using commas. In this case the\n"
+            "filters are 'or' combined. Filters in separate '-m' arguments are 'and'\n"
+            "combined.\n"
+            "The '-y' option accepts a single year or a comma separated list of years.\n"
+            "Example that outputs data from 2024 and 2025 for all call signs starting\n"
+            "with 'DF5':\n"
+            "  pota activators -y 24,2025 -c 'df5.*'\n"
+            "Output activators with german call signs from 2025 that have cw qsos:\n"
+            "  pota activators -y 2025 -c 'd[a-r].*' -m cw\n"
+            "Same as above but with cw only:\n"
+            "  pota activators -y 2025 -c 'd[a-r].*' -m cw -m ^data -m ^phone\n"
+            "Another way to say the same:\n"
+            "  pota activators -y 2025 -c 'd[a-r].*' -m '^cw<100%'\n"
+            "Ranking (most activations first) for 2024 excluding data operators:\n"
+            "  pota activators -a -y 2024 -m ^data\n"
+            "Output all activators that do mostly cw:\n"
+            "  pota activators -a -m 'cw>90%'\n"
+        ),
+
+    "awards":
+        CommandDef(
+            cmdAwards,
+            "pota awards <call>",
+            "Show the awards for a call.\n"
+        ),
+
+    "cleanup":
+        CommandDef(
+            cmdCleanup,
+            "pota cleanup",
+            "Cleanup the cache. Removes all outdated data. Should be executed from time to\n"
+            "time to shrink the cache.\n"
+        ),
+
+    "config":
+        CommandDef(
+            cmdConfig,
+            "pota config name[=value]",
+            "Query or set configuration variables.\n"
+            "Currently supported:\n"
+            "  general.callsign    The callsign of the user. Used when spotting.\n"
+            "\n"
+            "The configuration is stored in a file named '.pota' in the users home\n"
+            "directory.\n"
+        ),
+
+    "countries":
+        CommandDef(
+            cmdCountries,
+            "pota countries",
+            "Print all countries.\n"
+        ),
+
+    "help":
+        CommandDef(
+            cmdHelp,
+            "pota help [cmd|-v]",
+            "Print general help or help for one specific command.\n"
+            "Command options:\n"
+            "  -v, --verbose               Detailed help for all commands\n"
+        ),
+
+    "leaderboard":
+        CommandDef(
+            cmdLeaderboard,
+            "pota leaderboard <park>",
+            "Print the leader board for a park.\n"
+        ),
+
+    "mayor":
+        CommandDef(
+            cmdMayor,
+            "pota mayor <call|park|region(*)|country(*)>",
+            "Print the mayor for a park, all parks in a region or country or print all\n"
+            "parks where a user is the mayor (*).\n"
+            "For a call, only the parks from the last 25 activations are considered.\n"
+            "Command options:\n"
+            "  -q, --qsos                  Use QSO count instead of activations\n"
+        ),
+
+    "parks":
+        CommandDef(
+            cmdParks,
+            "pota parks [country|region]",
+            "Print parks sorted by park reference. Output may be limited to a single\n"
+            "country or a region. Command options:\n"
+            "  -a, --activations           Sort by number of activations\n"
+            "  -f, --first                 Add first activation info (*)\n"
+            "  -q, --qsos                  Sort by number of qsos\n"
+        ),
+
+    "profile":
+        CommandDef(
+            cmdProfile,
+            "pota profile <call|park>",
+            "Print the profile for a call or park.\n"
+        ),
+
+    "regions":
+        CommandDef(
+            cmdRegions,
+            "pota regions [country]",
+            "Print regions. Output may be limited to a single country.\n"
+        ),
+
+    "spot":
+        CommandDef(
+            cmdSpot,
+            "pota spot [options] call@park freq [mode]",
+            "Post a spot. Command options:\n"
+            "  -c text, --comment text     Post using this text as comment.\n"
+            "The call@park, freq and mode arguments can be specified in any order. They\n"
+            "are detected from their syntax. If no mode is given, SSB is assumed. The\n"
+            "frequency must be specified in kilohertz and may include trailing digits.\n"
+            "\n"
+            "The spotters callsign is taken from the configuration. See the config\n"
+            "command on how to set it.\n"
+            "\n"
+            "Example:\n"
+            "  pota spot df5wc@de-0008 14032.1 cw -c \"thanks, 73!\"\n"
+        ),
+
+    "spots":
+        CommandDef(
+            cmdSpots,
+            "pota spots [options]",
+            "Print currently active spots. Command options:\n"
+            "  -f f, --filter f            Add a filter for the displayed spots.\n"
+            "  -q, --qrt                   Include spots marked as qrt.\n"
+            "  -r, --rbn                   Print all spotters including RBN (*)\n"
+            "  -s, --spotters              Print all spotters w/o RBN (*)\n"
+            "Filter tokens can be bands, calls, modes, parks, regions or countries. All\n"
+            "filter tokens are compared in full, so you cannot use 'DE-00' to include\n"
+            "just a subset of parks (those starting with 'DE-00').\n"
+            "Multiple tokens can be added to one filter separated by commas. In this case\n"
+            "they are \"or\" combined. Multiple filters specified with -f are \"and\"\n"
+            "combined. So\n"
+            "  pota spots -f 20m,cw\n"
+            "prints all spots for 20m and all spots using mode CW, while\n"
+            "  pota spots -f 20m -f cw\n"
+            "prints all spots for 20m that are using mode CW.\n"
+            "Filter tokens may be negated using '^' as prefix. So\n"
+            "  pota spots -f ^ft8\n"
+            "shows all spots except those using FT8. Please note that using negations\n"
+            "with token lists is almost useless.\n"
+            "  pota spots -f ^ft4,ft8\n"
+            "will show all spots that aren't FT4 *OR* FT8 which actually means that all\n"
+            "spots will be shown.\n"
+        ),
+
+    "stats":
+        CommandDef(
+            cmdStats,
+            "pota stats <call|park>",
+            "Print statistics for a call or park.\n"
+        ),
+
+    "version":
+        CommandDef(
+            cmdVersion,
+            "pota version",
+            "Print the software version.\n"
+        )
+   }
 
 
 ###############################################################################
@@ -1718,42 +1885,10 @@ def main():
         if len(args) == 0:
             error("No command given - use \"pota help\" for help")
         cmd = args[0]
-        if cmd == "activations":
-            readActivations(args[1:])
-        elif cmd == "activators":
-            readActivators(args[1:])
-        elif cmd == "awards":
-            readAwards(args[1:])
-        elif cmd == "cleanup":
-            cleanupCache(args[1:])
-        elif cmd == "config":
-            editConfig(args[1:])
-        elif cmd == "countries":
-            readCountries(args[1:])
-        elif cmd == "help":
-            printHelp(args[1:])
-        elif cmd == "leaderboard":
-            readLeaderboard(args[1:])
-        elif cmd == "locations":
-            readLocations(args[1:])
-        elif cmd == "mayor":
-            readMayor(args[1:])
-        elif cmd == "parks":
-            readParks(args[1:])
-        elif cmd == "profile":
-            readProfile(args[1:])
-        elif cmd == "regions":
-            readRegions(args[1:])
-        elif cmd == "spot":
-            postSpot(args[1:])
-        elif cmd == "spots":
-            readSpots(args[1:])
-        elif cmd == "stats":
-            readStats(args[1:])
-        elif cmd == "version":
-            printVersion(args[1:])
-        else:
+        data = commands.get(cmd, None)
+        if data is None:
             error(f"Unknown command \"{cmd}\"")
+        data.handler(args[1:])
 
         # Done
         sys.exit(0)

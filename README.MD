@@ -36,14 +36,14 @@ Options -r/-w and -f cannot be used together. If -f is given, the cached data
 is used regardless of its age. Commands with lots of API calls will
 automatically enable rate limiting if not disabled on the command line.
 
-Available commands and their arguments are:
+Available commands are:
 
-activations [options] <call|park>
+  pota activations [options] <call|park>
   Print activations for a park or call. For a park, all activations are shown,
   for a call only up to 25 recent ones. Command options:
     -u, --unsuccessful          Include unsuccessful activations
 
-activators [options]
+  pota activators [options]
   Print a list of all activators, the number of activations and the number of
   contacts.
     -a, --activations           Sort by number of activations instead of call
@@ -85,13 +85,14 @@ activators [options]
   Output all activators that do mostly cw:
     pota activators -a -m 'cw>90%'
 
-awards <call>
+  pota awards <call>
   Show the awards for a call.
 
-cleanup
-  Cleanup the cache. Remove all outdated data.
+  pota cleanup
+  Cleanup the cache. Removes all outdated data. Should be executed from time to
+  time to shrink the cache.
 
-config name[=value]
+  pota config name[=value]
   Query or set configuration variables.
   Currently supported:
     general.callsign    The callsign of the user. Used when spotting.
@@ -99,33 +100,38 @@ config name[=value]
   The configuration is stored in a file named '.pota' in the users home
   directory.
 
-countries
+  pota countries
   Print all countries.
 
-leaderboard <park>
+  pota help [cmd|-v]
+  Print general help or help for one specific command.
+  Command options:
+    -v, --verbose               Detailed help for all commands
+
+  pota leaderboard <park>
   Print the leader board for a park.
 
-mayor <call|park|region(*)|country(*)>
+  pota mayor <call|park|region(*)|country(*)>
   Print the mayor for a park, all parks in a region or country or print all
   parks where a user is the mayor (*).
   For a call, only the parks from the last 25 activations are considered.
   Command options:
     -q, --qsos                  Use QSO count instead of activations
 
-parks [country|region]
+  pota parks [country|region]
   Print parks sorted by park reference. Output may be limited to a single
   country or a region. Command options:
     -a, --activations           Sort by number of activations
     -f, --first                 Add first activation info (*)
     -q, --qsos                  Sort by number of qsos
 
-profile <call|park>
+  pota profile <call|park>
   Print the profile for a call or park.
 
-regions [country]
+  pota regions [country]
   Print regions. Output may be limited to a single country.
 
-spot [options] call@park freq [mode]
+  pota spot [options] call@park freq [mode]
   Post a spot. Command options:
     -c text, --comment text     Post using this text as comment.
   The call@park, freq and mode arguments can be specified in any order. They
@@ -138,8 +144,7 @@ spot [options] call@park freq [mode]
   Example:
     pota spot df5wc@de-0008 14032.1 cw -c "thanks, 73!"
 
-
-spots [options]
+  pota spots [options]
   Print currently active spots. Command options:
     -f f, --filter f            Add a filter for the displayed spots.
     -q, --qrt                   Include spots marked as qrt.
@@ -163,11 +168,18 @@ spots [options]
   will show all spots that aren't FT4 *OR* FT8 which actually means that all
   spots will be shown.
 
-stats <call|park>
+  pota stats <call|park>
   Print statistics for a call or park.
 
-version
+  pota version
   Print the software version.
+
+
+Use
+  pota help <command>
+to get detailed help for a specific command or use
+  pota help -v
+to get detailed help for all commands (beware, large!).
 
 Options marked with (*) will cause additional API calls and will automatically
 apply rate limiting which increases command execution times. It is possible to
