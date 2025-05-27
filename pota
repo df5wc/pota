@@ -192,7 +192,7 @@ def isValidRegEx(regex):
 
 # Return program information from SVN in a dict
 def getVersion():
-    svnId = "$Id: pota 3692 2025-03-06 16:30:32Z uz $"
+    svnId = "$Id: pota 3706 2025-05-27 12:52:18Z uz $"
     idPat = '\\d+'
     datePat = '\\d{4}-\\d{2}-\\d{2} \\d{2}:\\d{2}:\\d{2}'
     userPat = '\\w+'
@@ -1012,6 +1012,8 @@ def cmdActivators(args):
                 field = "TotalPhoneContacts"
             def filter(entry):
                 value = entry[field]
+                if value is None:
+                    value = 0.0
                 if compareVal is None:
                     return (value > 0) == expected
                 if percent:
@@ -1173,7 +1175,7 @@ def cmdHelp(args):
             print(f"  {data.synopsis}")
             if verbose:
                 for line in data.description.split('\n'):
-                    print(f"  {line}")
+                    print(f"    {line}" if len(line) > 0 else "")
         print(
             "\n"
             "Use\n"
