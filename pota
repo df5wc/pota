@@ -146,6 +146,14 @@ def printJson(text):
     print(formatted)
 
 
+# Convert a string to an integer number returning zero if the string is None
+def toInt(str):
+    if str is None:
+        return 0
+    else:
+        return int(str)
+
+
 # Check if the given token is a ham radio band
 def isBand(token):
     return re.search("^[0-9]+C?M$", token, flags = re.I) is not  None
@@ -646,11 +654,11 @@ def outputActivatorTotals(activators):
     data = 0
     phone = 0
     for e in activators:
-        act += int(e["activations"])
-        qsos += int(e["TotalContacts"])
-        cw += int(e["TotalCWContacts"])
-        data += int(e["TotalDataContacts"])
-        phone += int(e["TotalPhoneContacts"])
+        act += toInt(e["activations"])
+        qsos += toInt(e["TotalContacts"])
+        cw += toInt(e["TotalCWContacts"])
+        data += toInt(e["TotalDataContacts"])
+        phone += toInt(e["TotalPhoneContacts"])
     if qsos > 0:
         cwP = float(cw) / float(qsos)
         dataP = float(data) / float(qsos)
